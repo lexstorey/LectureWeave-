@@ -163,6 +163,7 @@ def _segment_text(segment: dict[str, Any], known_terms: set[str]) -> str:
                 and len(letters) >= 4
                 and letters.isalpha()
                 and letters.casefold() not in known_terms
+                and letters.casefold() not in COMMON_WORDS
             ):
                 leading = raw[: len(raw) - len(raw.lstrip())]
                 prefix = re.match(r"^\W*", core).group(0)
