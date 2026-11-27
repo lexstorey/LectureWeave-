@@ -794,6 +794,66 @@ def write_transcript_files(segments: list[dict[str, Any]], output_dir: Path) -> 
             )
 
 
+SENTENCE_SNAP_SECONDS = 2.5
+
+
+def _segment_from_words(template: dict[str, Any], words: list[dict[str, Any]]) -> dict[str, Any]:
+    piece = dict(template)
+    piece["words"] = words
+    piece["start"] = float(words[0]["start"])
+    piece["end"] = float(words[-1]["end"])
+    piece["text"] = re.sub(r"\s+", " ", "".join(str(word["word"]) for word in words)).strip()
+    piece.pop("straddles", None)
+    return piece
+
+
+def split_at_slide_boundaries(
+    segment: dict[str, Any], boundaries: list[float]
+) -> list[dict[str, Any]]:
+    """Split a speech segment where the slide changes, at the nearest sentence end.
+
+    Whole segments used to be filed by their midpoint, so a sentence spoken
+    just after a slide change could land under the previous slide. With word
+    timestamps the segment is cut at a sentence end within a couple of seconds
+    of the change. If there is none, the segment stays whole and is marked as
+    straddling the change.
+    """
+    start, end = float(segment["start"]), float(segment["end"])
+    inside = [boundary for boundary in boundaries if start < boundary < end]
+    if not inside:
+        return [segment]
+    words = [word for word in segment.get("words") or [] if "start" in word and "end" in word]
+    if len(words) < 2:
+        return [dict(segment, straddles=True)]
+    cuts: list[int] = []
+    unresolved = False
+    for boundary in inside:
+        best: int | None = None
+        for index in range(1, len(words)):
+            if not re.search(r"[.?!][\"'”’)]*$", str(words[index - 1]["word"]).strip()):
+                continue
+            distance = abs(float(words[index]["start"]) - boundary)
+            if distance <= SENTENCE_SNAP_SECONDS and (
+                best is None or distance < abs(float(words[best]["start"]) - boundary)
+            ):
+                best = index
+        if best is None:
+            unresolved = True
+        elif best not in cuts:
+            cuts.append(best)
+    if not cuts:
+        return [dict(segment, straddles=True)]
+    pieces: list[dict[str, Any]] = []
+    previous = 0
+    for cut in sorted(cuts) + [len(words)]:
+        if cut > previous:
+            pieces.append(_segment_from_words(segment, words[previous:cut]))
+        previous = cut
+    if unresolved:
+        pieces = [dict(piece, straddles=True) for piece in pieces]
+    return pieces
+
+
 def align_segments(
     slides: list[dict[str, Any]],
     segments: list[dict[str, Any]],
@@ -812,9 +872,11 @@ def align_segments(
                 break
         return selected
 
+    boundaries = [float(slide["alignment_start"]) for slide in slides[1:]]
     for segment in segments:
-        midpoint = (segment["start"] + segment["end"]) / 2
-        matching_slide(midpoint)["segments"].append(segment)
+        for piece in split_at_slide_boundaries(segment, boundaries):
+            midpoint = (piece["start"] + piece["end"]) / 2
+            matching_slide(midpoint)["segments"].append(piece)
     for comment in comments or []:
         matching_slide(float(comment["start"]))["comments"].append(comment)
 
