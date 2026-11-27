@@ -22,6 +22,11 @@ class DeckPage:
     number: int
     text: str
     image: str | None = None
+    deck: str = "A"
+
+    @property
+    def label(self) -> str:
+        return f"{self.deck}{self.number}"
 
 
 def normalise_slide_text(text: str) -> str:
@@ -93,18 +98,41 @@ def _image_features(path: str) -> tuple[np.ndarray, np.ndarray] | None:
     return perceptual_hash(small), cv2.resize(small, (96, 54), interpolation=cv2.INTER_AREA)
 
 
+def _assign_page(slide: dict[str, Any], page: DeckPage, source: str, confidence: str,
+                 alternative: DeckPage | None = None) -> None:
+    slide["deck_slide_number"] = page.number
+    slide["deck_label"] = page.deck
+    slide["deck_text"] = page.text
+    slide["slide_text"] = page.text or slide.get("slide_text", "")
+    if page.image:
+        slide["deck_image"] = page.image
+    slide["text_source"] = source
+    slide["match_confidence"] = confidence
+    if alternative is not None:
+        slide["match_alternative"] = alternative.label
+    else:
+        slide.pop("match_alternative", None)
+
+
 def match_deck_pages(slides: list[dict[str, Any]], pages: list[DeckPage]) -> None:
-    """Attach actual deck page numbers and native content to video appearances."""
+    """Attach actual deck page numbers and native content to video appearances.
+
+    Pages may come from several decks (``DeckPage.deck`` = "A", "B", …).
+    Rendered PDF pages are matched visually and by text; PowerPoint pages,
+    which have no rendering, are matched by text alone. Each match records a
+    confidence and, when the runner-up was close, the alternative page.
+    """
     rendered = [(page, _image_features(page.image)) for page in pages if page.image]
     rendered = [(page, features) for page, features in rendered if features is not None]
+    text_only = [page for page in pages if not page.image]
     if rendered:
         for slide in slides:
             features = _image_features(slide["image"])
             if features is None:
                 continue
             slide_hash, slide_hist = features
-            scored: list[tuple[float, float, float, DeckPage]] = []
-            for page, page_features in rendered:
+            scored: list[tuple[float, float, float, int, DeckPage]] = []
+            for position, (page, page_features) in enumerate(rendered):
                 page_hash, page_hist = page_features
                 distance = hash_distance(slide_hash, page_hash)
                 histogram_penalty = max(
@@ -113,57 +141,78 @@ def match_deck_pages(slides: list[dict[str, Any]], pages: list[DeckPage]) -> Non
                 visual_score = distance + histogram_penalty
                 text_score = float(token_set_ratio(slide.get("slide_text", ""), page.text))
                 combined = visual_score + (100.0 - text_score) * 0.25
-                scored.append((combined, visual_score, text_score, page))
-            scored.sort(key=lambda item: item[0])
-            combined, visual_score, text_score, page = scored[0]
+                scored.append((combined, visual_score, text_score, position, page))
+            scored.sort(key=lambda item: (item[0], item[3]))
+            combined, visual_score, text_score, _position, page = scored[0]
             margin = scored[1][0] - combined if len(scored) > 1 else 100.0
             if (
                 (text_score >= 55 and margin >= 3)
                 or text_score >= 78
                 or (visual_score <= 14 and margin >= 2)
             ):
-                slide["deck_slide_number"] = page.number
-                slide["deck_text"] = page.text
-                slide["slide_text"] = page.text or slide.get("slide_text", "")
-                slide["deck_image"] = page.image
-                slide["text_source"] = "supplied slide pack"
-        return
+                confident = text_score >= 78 or (visual_score <= 8 and margin >= 6)
+                _assign_page(
+                    slide,
+                    page,
+                    "supplied slide pack",
+                    "high" if confident else "medium",
+                    scored[1][4] if len(scored) > 1 and margin < 4 else None,
+                )
 
-    # PowerPoint text is still useful without PowerPoint rendering.  Sequential
-    # assignment is safe only when the distinct captured slides match the deck.
+    # PowerPoint text is useful without rendering: match it to video OCR text
+    # with a confidence margin so the app never guesses.
+    if text_only:
+        for slide in slides:
+            if slide.get("deck_slide_number"):
+                continue
+            scored_text = sorted(
+                (
+                    (float(token_set_ratio(slide.get("slide_text", ""), page.text)), -position, page)
+                    for position, page in enumerate(text_only)
+                ),
+                key=lambda item: (item[0], item[1]),
+            )
+            if not scored_text:
+                continue
+            score, _position, page = scored_text[-1]
+            second = scored_text[-2][0] if len(scored_text) > 1 else 0.0
+            if score >= 62 and score - second >= 8:
+                _assign_page(
+                    slide,
+                    page,
+                    "supplied PowerPoint text",
+                    "high" if score >= 80 and score - second >= 15 else "medium",
+                    scored_text[-2][2] if len(scored_text) > 1 and score - second < 12 else None,
+                )
+
+    # One PowerPoint deck whose distinct captured slides match its slide count
+    # can be assigned in order when nothing could be matched directly.
+    decks = {page.deck for page in pages}
     canonical_ids = list(dict.fromkeys(
         int(slide.get("canonical_index", slide["index"])) for slide in slides
     ))
-    # Native PowerPoint text can often be matched directly to video OCR even
-    # without rendering PowerPoint. Use a confidence margin to avoid guessing.
-    if pages:
-        for slide in slides:
-            scored = sorted(
-                (
-                    float(token_set_ratio(slide.get("slide_text", ""), page.text)),
-                    page,
-                )
-                for page in pages
-            )
-            if not scored:
-                continue
-            score, page = scored[-1]
-            second = scored[-2][0] if len(scored) > 1 else 0.0
-            if score >= 62 and score - second >= 8:
-                slide["deck_slide_number"] = page.number
-                slide["deck_text"] = page.text
-                slide["slide_text"] = page.text or slide.get("slide_text", "")
-                slide["text_source"] = "supplied PowerPoint text"
-
     unmatched = [slide for slide in slides if not slide.get("deck_slide_number")]
-    if pages and len(canonical_ids) == len(pages) and len(unmatched) == len(slides):
-        mapping = dict(zip(canonical_ids, pages))
+    if (
+        text_only
+        and not rendered
+        and len(decks) == 1
+        and len(canonical_ids) == len(text_only)
+        and len(unmatched) == len(slides)
+    ):
+        mapping = dict(zip(canonical_ids, text_only))
         for slide in slides:
             page = mapping[int(slide.get("canonical_index", slide["index"]))]
-            slide["deck_slide_number"] = page.number
-            slide["deck_text"] = page.text
-            slide["slide_text"] = page.text or slide.get("slide_text", "")
-            slide["text_source"] = "supplied PowerPoint text"
+            _assign_page(slide, page, "supplied PowerPoint text", "low")
+
+
+def slide_reference(slide: dict[str, Any], multiple_decks: bool) -> str | None:
+    """Human label for a matched slide, e.g. "Deck B slide 12" or "Deck slide 12"."""
+    number = slide.get("deck_slide_number")
+    if not number:
+        return None
+    if multiple_decks:
+        return f"Deck {slide.get('deck_label', 'A')} slide {number}"
+    return f"Deck slide {number}"
 
 
 def run_slide_ocr(

@@ -1066,6 +1066,9 @@ def build_docx(
     omitted_slide_count: int = 0,
     progress_callback: ProgressCallback | None = None,
 ) -> None:
+    multiple_decks = len({
+        slide.get("deck_label", "A") for slide in slides if slide.get("deck_slide_number")
+    }) > 1
     document = Document()
     section = document.sections[0]
     section.page_width = Inches(8.5)
@@ -1138,8 +1141,13 @@ def build_docx(
         heading = document.add_paragraph(style="Heading 1")
         deck_number = slide.get("deck_slide_number")
         if deck_number:
+            reference = (
+                f"Deck {slide.get('deck_label', 'A')} slide {deck_number}"
+                if multiple_decks
+                else f"Deck slide {deck_number}"
+            )
             heading.add_run(
-                f"Deck slide {deck_number} · video appearance {slide_position + 1}  "
+                f"{reference} · video appearance {slide_position + 1}  "
                 f"{format_time(slide['start'])}"
             )
         else:

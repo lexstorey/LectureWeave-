@@ -707,7 +707,9 @@ class ReviewDialog(QDialog):
         for position, slide in enumerate(self.slides, 1):
             slide.setdefault("_include", True)
             deck = slide.get("deck_slide_number")
-            label = f"Deck slide {deck}" if deck else "Unmatched slide"
+            label = (
+            f"Deck {slide.get('deck_label', 'A')} slide {deck}" if deck else "Unmatched slide"
+        )
             self.slide_list.addItem(
                 f"{position}. {label} · {format_time(slide['start'])}"
             )
@@ -762,7 +764,9 @@ class ReviewDialog(QDialog):
     def _refresh_list_item(self, row: int) -> None:
         slide = self.slides[row]
         deck = slide.get("deck_slide_number")
-        label = f"Deck slide {deck}" if deck else "Unmatched slide"
+        label = (
+            f"Deck {slide.get('deck_label', 'A')} slide {deck}" if deck else "Unmatched slide"
+        )
         included = "" if slide.get("_include", True) else " · EXCLUDED"
         self.slide_list.item(row).setText(
             f"{row + 1}. {label} · {format_time(slide['start'])}{included}"
