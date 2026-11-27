@@ -4,7 +4,13 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from lecture_transcript_gui_qt import UpdateDownloadThread, release_asset_sha256, version_key
+from lecture_transcript_gui_qt import (
+    UpdateDownloadThread,
+    release_asset_sha256,
+    release_tag_from_url,
+    sha256_from_checksum_file,
+    version_key,
+)
 
 
 class UpdaterTests(unittest.TestCase):
@@ -21,6 +27,26 @@ class UpdaterTests(unittest.TestCase):
     def test_compares_semantic_versions(self):
         self.assertGreater(version_key("v0.2.2"), version_key("0.2.1"))
         self.assertEqual((1, 4, 0), version_key("v1.4"))
+
+    def test_reads_release_tag_from_github_redirect(self):
+        self.assertEqual(
+            "v0.2.5",
+            release_tag_from_url(
+                "https://github.com/lexstorey/LectureWeave-/releases/tag/v0.2.5"
+            ),
+        )
+
+    def test_reads_installer_checksum(self):
+        checksum = "ab" * 32
+        sums = f"{checksum}  LectureWeavePlus-Setup.exe\n{'cd' * 32}  other.zip\n"
+        self.assertEqual(
+            checksum,
+            sha256_from_checksum_file(sums, "LectureWeavePlus-Setup.exe"),
+        )
+
+    def test_rejects_unexpected_release_redirect(self):
+        with self.assertRaises(ValueError):
+            release_tag_from_url("https://github.com/lexstorey/LectureWeave-/releases")
 
     def test_downloads_and_verifies_installer_before_completing(self):
         content = b"small fake installer used only by the updater test"

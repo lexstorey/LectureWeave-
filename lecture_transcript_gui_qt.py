@@ -10,6 +10,7 @@ import re
 import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from PySide6.QtCore import QProcess, QThread, QTimer, QUrl, Qt, Signal
@@ -46,9 +47,8 @@ from lecture_to_docx import (
 
 
 APP_NAME = "LectureWeave+"
-APP_VERSION = "0.2.4"
+APP_VERSION = "0.2.5"
 REPOSITORY_URL = "https://github.com/lexstorey/LectureWeave-"
-LATEST_RELEASE_API = "https://api.github.com/repos/lexstorey/LectureWeave-/releases/latest"
 PURPLE = "#4A148C"
 PURPLE_DARK = "#32105D"
 PURPLE_LIGHT = "#F2ECFA"
@@ -99,6 +99,24 @@ def release_asset_sha256(value: str) -> str:
     if not match:
         raise ValueError("The release does not include a valid SHA-256 digest.")
     return match.group(1).lower()
+
+
+def release_tag_from_url(value: str) -> str:
+    match = re.search(r"/releases/tag/([^/?#]+)", value)
+    if not match:
+        raise ValueError("GitHub did not identify the latest release version.")
+    tag = urllib.parse.unquote(match.group(1))
+    if not re.fullmatch(r"v?\d+(?:\.\d+){1,3}", tag):
+        raise ValueError(f"GitHub returned an unexpected release version: {tag}")
+    return tag
+
+
+def sha256_from_checksum_file(value: str, filename: str) -> str:
+    for line in value.splitlines():
+        match = re.fullmatch(r"\s*([0-9a-fA-F]{64})\s+\*?(.+?)\s*", line)
+        if match and Path(match.group(2)).name == filename:
+            return match.group(1).lower()
+    raise ValueError(f"The release checksum file does not contain {filename}.")
 
 
 class DropLineEdit(QLineEdit):
@@ -165,17 +183,38 @@ class UpdateCheckThread(QThread):
 
     def run(self) -> None:
         try:
-            request = urllib.request.Request(
-                LATEST_RELEASE_API,
-                headers={
-                    "Accept": "application/vnd.github+json",
-                    "User-Agent": f"LectureWeavePlus/{APP_VERSION}",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                },
+            headers = {"User-Agent": f"LectureWeavePlus/{APP_VERSION}"}
+            latest_request = urllib.request.Request(
+                f"{REPOSITORY_URL}/releases/latest",
+                headers=headers,
+                method="HEAD",
             )
-            with urllib.request.urlopen(request, timeout=12) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-            self.completed.emit(payload)
+            with urllib.request.urlopen(latest_request, timeout=12) as response:
+                tag = release_tag_from_url(response.geturl())
+
+            release_url = f"{REPOSITORY_URL}/releases/tag/{urllib.parse.quote(tag)}"
+            asset_base = f"{REPOSITORY_URL}/releases/download/{urllib.parse.quote(tag)}"
+            checksum_request = urllib.request.Request(
+                f"{asset_base}/SHA256SUMS.txt",
+                headers=headers,
+            )
+            with urllib.request.urlopen(checksum_request, timeout=12) as response:
+                checksum_text = response.read().decode("ascii")
+            installer_name = "LectureWeavePlus-Setup.exe"
+            checksum = sha256_from_checksum_file(checksum_text, installer_name)
+            self.completed.emit(
+                {
+                    "tag_name": tag,
+                    "html_url": release_url,
+                    "assets": [
+                        {
+                            "name": installer_name,
+                            "browser_download_url": f"{asset_base}/{installer_name}",
+                            "digest": f"sha256:{checksum}",
+                        }
+                    ],
+                }
+            )
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 self.failed.emit("No published LectureWeave+ release is available yet.")
