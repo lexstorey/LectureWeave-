@@ -84,6 +84,8 @@ PURPLE = "#4A148C"
 PURPLE_DARK = "#32105D"
 PURPLE_LIGHT = "#F2ECFA"
 BACKGROUND = "#F5F4F8"
+BORDER = "#E4E0E8"
+MUTED = "#5F5868"
 TEXT = "#26232B"
 BLACKBOARD_VIDEO_COMMAND = 'copy(document.querySelector("video")?.currentSrc)'
 GPU_SETUP_URL = "https://github.com/SYSTRAN/faster-whisper#gpu"
@@ -230,11 +232,11 @@ class DropArea(QLabel):
     file_dropped = Signal(str)
 
     def __init__(self) -> None:
-        super().__init__("DROP VIDEO HERE")
+        super().__init__("Drop a lecture video here")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setAcceptDrops(True)
         self.setObjectName("dropArea")
-        self.setMinimumHeight(48)
+        self.setMinimumHeight(64)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls() and event.mimeData().urls()[0].isLocalFile():
@@ -902,26 +904,43 @@ class MainWindow(QMainWindow):
 
         self.setStyleSheet(
             f"""
-            QMainWindow, QScrollArea, QWidget#scrollBody {{ background: {BACKGROUND}; }}
-            QFrame#card {{ background: white; border: 1px solid #E4E0E8; border-radius: 9px; }}
-            QLabel {{ color: {TEXT}; font-family: 'Segoe UI'; font-size: 10pt; }}
-            QLabel#headerTitle {{ color: white; font-size: 22pt; font-weight: 600; }}
-            QLabel#headerSubtitle {{ color: #E8DEF2; font-size: 10pt; }}
+            QMainWindow, QDialog, QScrollArea, QWidget#scrollBody {{ background: {BACKGROUND}; }}
+            QFrame#header {{ background: {PURPLE_DARK}; }}
+            QFrame#card {{ background: white; border: 1px solid {BORDER}; border-radius: 12px; }}
+            QLabel {{ color: {TEXT}; font-family: 'Segoe UI'; font-size: 10pt; background: transparent; }}
+            QLabel#headerTitle {{ color: white; font-size: 15pt; font-weight: 700; }}
+            QLabel#headerSubtitle {{ color: #E3D6F1; font-size: 9pt; }}
             QLabel#section {{ color: {TEXT}; font-size: 11pt; font-weight: 600; }}
-            QLabel#hint {{ color: #68626E; font-size: 9pt; }}
+            QLabel#field {{ color: {MUTED}; font-size: 9pt; font-weight: 600; padding-top: 4px; }}
+            QLabel#hint {{ color: {MUTED}; font-size: 9pt; }}
             QLabel#count {{ color: {PURPLE}; font-size: 9pt; font-weight: 600; }}
-            QLabel#dropArea {{ background: {PURPLE_LIGHT}; color: {PURPLE}; border: 1px solid #BFA8D7; border-radius: 6px; font-weight: 600; }}
-            QFrame#consoleHelp {{ background: #FAF7FD; border: 1px solid #D8C8E7; border-radius: 6px; }}
-            QLineEdit, QTextEdit, QComboBox {{ background: white; color: {TEXT}; border: 1px solid #CFC9D5; border-radius: 5px; padding: 7px; font-family: 'Segoe UI'; font-size: 10pt; }}
+            QLabel#dropArea {{ background: {PURPLE_LIGHT}; color: {PURPLE}; border: 1px dashed #B9A2D6; border-radius: 10px; font-weight: 600; }}
+            QFrame#consoleHelp {{ background: #FAF7FD; border: 1px solid #D8C8E7; border-radius: 8px; }}
+            QFrame#segmented {{ background: #ECE8F0; border: none; border-radius: 8px; }}
+            QLineEdit, QTextEdit, QComboBox {{ background: white; color: {TEXT}; border: 1px solid #CFC9D5; border-radius: 8px; padding: 8px 10px; font-family: 'Segoe UI'; font-size: 10pt; }}
             QLineEdit:focus, QTextEdit:focus, QComboBox:focus {{ border: 2px solid {PURPLE}; }}
-            QPushButton {{ background: #ECE8F0; color: {TEXT}; border: 1px solid #D0C8D7; border-radius: 6px; padding: 8px 14px; font-family: 'Segoe UI'; font-size: 10pt; }}
+            QLineEdit#mono, QTextEdit#log {{ font-family: Consolas; font-size: 9pt; background: #FAF9FC; }}
+            QPushButton {{ background: #ECE8F0; color: {TEXT}; border: 1px solid #D0C8D7; border-radius: 8px; padding: 8px 14px; min-height: 22px; font-family: 'Segoe UI'; font-size: 10pt; }}
             QPushButton:hover {{ background: #E2D8EC; }}
-            QPushButton#primary {{ background: {PURPLE}; color: white; border: none; font-weight: 600; padding: 10px 20px; }}
+            QPushButton#primary {{ background: {PURPLE}; color: white; border: none; border-radius: 10px; font-size: 11pt; font-weight: 600; padding: 12px 20px; }}
             QPushButton#primary:hover {{ background: #5D229E; }}
+            QPushButton#primary:disabled {{ background: #B7A6CC; color: white; }}
+            QPushButton#quiet {{ background: transparent; border: 1px solid transparent; color: {MUTED}; }}
+            QPushButton#quiet:hover {{ background: #ECE8F0; }}
+            QPushButton#danger {{ background: white; color: #9E2A2A; border: 1px solid #E3B7B7; font-weight: 600; }}
+            QPushButton#danger:hover {{ background: #FBEDED; }}
+            QPushButton#link {{ background: transparent; border: none; color: {PURPLE}; padding: 4px 2px; text-decoration: underline; font-size: 9pt; }}
+            QPushButton#disclosure {{ background: transparent; border: none; color: {TEXT}; padding: 6px 0; text-align: left; font-weight: 600; }}
+            QPushButton#disclosure:checked {{ color: {PURPLE}; }}
+            QPushButton#segment {{ background: transparent; border: none; border-radius: 6px; color: {MUTED}; padding: 8px 10px; }}
+            QPushButton#segment:checked {{ background: white; color: {PURPLE_DARK}; font-weight: 600; }}
+            QPushButton#headerButton {{ background: transparent; color: white; border: 1px solid rgba(255, 255, 255, 90); padding: 8px 16px; }}
+            QPushButton#headerButton:hover {{ background: rgba(255, 255, 255, 30); }}
             QPushButton:disabled {{ color: #9B96A0; background: #EEECEF; }}
-            QCheckBox {{ color: {TEXT}; font-family: 'Segoe UI'; font-size: 9pt; spacing: 7px; }}
-            QProgressBar {{ border: none; background: #DED9E6; height: 7px; border-radius: 3px; }}
-            QProgressBar::chunk {{ background: {PURPLE}; border-radius: 3px; }}
+            QPushButton#quiet:disabled, QPushButton#segment:disabled {{ color: #A9A3AF; background: transparent; }}
+            QCheckBox {{ color: {TEXT}; font-family: 'Segoe UI'; font-size: 9pt; spacing: 8px; }}
+            QProgressBar {{ border: none; background: #E6E0EE; max-height: 8px; border-radius: 4px; }}
+            QProgressBar::chunk {{ background: {PURPLE}; border-radius: 4px; }}
             """
         )
         self.build_interface()
@@ -955,19 +974,33 @@ class MainWindow(QMainWindow):
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
 
+        # Header: product identity on the left, settings on the right.
         header = QFrame()
-        header.setStyleSheet(f"background: {PURPLE_DARK};")
-        header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(30, 20, 30, 20)
+        header.setObjectName("header")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(24, 14, 24, 14)
+        header_layout.setSpacing(12)
+        icon_path = resource_path("assets/lectureweave-plus.ico")
+        if icon_path.exists():
+            header_icon = QLabel()
+            header_icon.setPixmap(QIcon(str(icon_path)).pixmap(36, 36))
+            header_icon.setStyleSheet("background: transparent;")
+            header_layout.addWidget(header_icon)
+        title_block = QVBoxLayout()
+        title_block.setSpacing(0)
         title = QLabel(APP_NAME)
         title.setObjectName("headerTitle")
-        subtitle = QLabel(
-            f"Version {APP_VERSION} · Align a lecture with its real deck slides, spoken discussion "
-            "and chat—then export one organised Word document."
-        )
+        subtitle = QLabel(f"Slides, speech and chat—kept in sync. · Version {APP_VERSION}")
         subtitle.setObjectName("headerSubtitle")
-        header_layout.addWidget(title)
-        header_layout.addWidget(subtitle)
+        title_block.addWidget(title)
+        title_block.addWidget(subtitle)
+        header_layout.addLayout(title_block)
+        header_layout.addStretch(1)
+        self.settings_button = QPushButton("Settings")
+        self.settings_button.setObjectName("headerButton")
+        self.settings_button.setToolTip("WhisperX, speaker labels and updates")
+        self.settings_button.clicked.connect(self.open_settings)
+        header_layout.addWidget(self.settings_button)
         central_layout.addWidget(header)
 
         scroll = QScrollArea()
@@ -975,38 +1008,46 @@ class MainWindow(QMainWindow):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         body = QWidget()
         body.setObjectName("scrollBody")
-        body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(26, 20, 26, 28)
-        body_layout.setSpacing(14)
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(24, 20, 24, 24)
+        body_layout.setSpacing(18)
+        left_column = QVBoxLayout()
+        left_column.setSpacing(14)
+        right_column = QVBoxLayout()
+        right_column.setSpacing(14)
+        body_layout.addLayout(left_column, 3)
+        body_layout.addLayout(right_column, 2)
 
+        # Recording
         video_card, video_layout = self.card()
-        video_layout.addWidget(self.section_label("1. Lecture video"))
-        video_layout.addWidget(
-            self.hint_label(
-                "Drop an MP4 here, or browse to it. Other common video formats may also work."
-            )
-        )
+        video_heading = QHBoxLayout()
+        video_heading.addWidget(self.section_label("Recording"))
+        video_heading.addStretch(1)
+        blackboard_toggle = QPushButton("Can’t download from Blackboard?")
+        blackboard_toggle.setObjectName("link")
+        blackboard_toggle.setCheckable(True)
+        video_heading.addWidget(blackboard_toggle)
+        video_layout.addLayout(video_heading)
+        drop_area = DropArea()
+        drop_area.file_dropped.connect(self.set_video)
+        video_layout.addWidget(drop_area)
         video_row = QHBoxLayout()
         self.video_edit = DropLineEdit()
-        self.video_edit.setPlaceholderText("Choose or drop a lecture recording")
+        self.video_edit.setPlaceholderText("Choose or drop a lecture recording (MP4 and most video formats)")
         self.video_edit.file_dropped.connect(self.set_video)
         browse_video = QPushButton("Browse…")
         browse_video.clicked.connect(self.browse_video)
         video_row.addWidget(self.video_edit, 1)
         video_row.addWidget(browse_video)
         video_layout.addLayout(video_row)
-        drop_area = DropArea()
-        drop_area.file_dropped.connect(self.set_video)
-        video_layout.addWidget(drop_area)
 
         console_help = QFrame()
         console_help.setObjectName("consoleHelp")
+        console_help.setVisible(False)
+        blackboard_toggle.toggled.connect(console_help.setVisible)
         console_help_layout = QVBoxLayout(console_help)
         console_help_layout.setContentsMargins(12, 10, 12, 10)
         console_help_layout.setSpacing(6)
-        console_title = QLabel("Can’t download the Blackboard recording?")
-        console_title.setStyleSheet(f"font-weight: 600; color: {PURPLE}; border: none;")
-        console_help_layout.addWidget(console_title)
         console_help_layout.addWidget(
             self.hint_label(
                 "While the authorised recording is open and playing, press F12, choose Console, "
@@ -1017,7 +1058,7 @@ class MainWindow(QMainWindow):
         command_row = QHBoxLayout()
         self.console_command = QLineEdit(BLACKBOARD_VIDEO_COMMAND)
         self.console_command.setReadOnly(True)
-        self.console_command.setStyleSheet("font-family: Consolas; font-size: 9pt;")
+        self.console_command.setObjectName("mono")
         copy_command = QPushButton("Copy F12 command")
         copy_command.clicked.connect(self.copy_blackboard_command)
         command_row.addWidget(self.console_command, 1)
@@ -1030,84 +1071,229 @@ class MainWindow(QMainWindow):
             )
         )
         video_layout.addWidget(console_help)
-        body_layout.addWidget(video_card)
+        left_column.addWidget(video_card)
 
+        # Slide pack
+        deck_card, deck_layout = self.card()
+        deck_heading = QHBoxLayout()
+        deck_heading.addWidget(self.section_label("Slide pack"))
+        deck_heading.addWidget(self.hint_label("optional, recommended"))
+        deck_heading.addStretch(1)
+        deck_layout.addLayout(deck_heading)
+        deck_row = QHBoxLayout()
+        self.deck_edit = DropLineEdit()
+        self.deck_edit.setPlaceholderText("Choose or drop a PDF or PowerPoint slide pack")
+        self.deck_edit.file_dropped.connect(self.set_deck)
+        choose_deck = QPushButton("Choose…")
+        choose_deck.clicked.connect(self.browse_deck)
+        clear_deck = QPushButton("Clear")
+        clear_deck.setObjectName("quiet")
+        clear_deck.clicked.connect(self.deck_edit.clear)
+        deck_row.addWidget(self.deck_edit, 1)
+        deck_row.addWidget(choose_deck)
+        deck_row.addWidget(clear_deck)
+        deck_layout.addLayout(deck_row)
+        deck_layout.addWidget(
+            self.hint_label(
+                "A PDF gives exact slide numbers, native text and clean images. Without a deck, "
+                "slide text is read from the video with local OCR."
+            )
+        )
+        left_column.addWidget(deck_card)
+
+        # Chat comments
         comments_card, comments_layout = self.card()
         comments_heading = QHBoxLayout()
-        comments_heading.addWidget(self.section_label("2. Chat comments (optional)"))
+        comments_heading.addWidget(self.section_label("Chat comments"))
+        comments_heading.addWidget(self.hint_label("optional"))
         comments_heading.addStretch(1)
         self.comment_count = QLabel("No timestamped comments detected")
         self.comment_count.setObjectName("count")
         comments_heading.addWidget(self.comment_count)
         comments_layout.addLayout(comments_heading)
-        comments_layout.addWidget(
-            self.hint_label(
-                "Paste the copied Blackboard chat list. Names, timestamps, messages and emoji are detected automatically."
-            )
-        )
         self.comments_edit = QTextEdit()
+        self.comments_edit.setAcceptRichText(False)
         self.comments_edit.setPlaceholderText(
-            "Paste comments here, for example:\n\n- AMANDA SCHWARTZ\n  00:47\n  Yep sure can"
+            "Paste the copied Blackboard chat list here. Names, timestamps, messages and emoji "
+            "are detected automatically."
         )
-        self.comments_edit.setMinimumHeight(220)
+        self.comments_edit.setMinimumHeight(110)
+        self.comments_edit.setMaximumHeight(170)
         self.comments_edit.textChanged.connect(self.schedule_comment_count)
         comments_layout.addWidget(self.comments_edit)
-        body_layout.addWidget(comments_card)
+        chat_buttons = QHBoxLayout()
+        paste_chat = QPushButton("Paste from clipboard")
+        paste_chat.clicked.connect(self.paste_comments)
+        clear_chat = QPushButton("Clear")
+        clear_chat.setObjectName("quiet")
+        clear_chat.clicked.connect(self.comments_edit.clear)
+        chat_buttons.addWidget(paste_chat)
+        chat_buttons.addWidget(clear_chat)
+        chat_buttons.addStretch(1)
+        comments_layout.addLayout(chat_buttons)
+        left_column.addWidget(comments_card)
+        left_column.addStretch(1)
 
-        details_card, details_layout = self.card()
-        details_layout.addWidget(self.section_label("3. Document details"))
-        title_row = QHBoxLayout()
-        title_label = self.hint_label("Title")
-        title_label.setFixedWidth(72)
+        # Output options (locked while generating)
+        output_card, output_layout = self.card()
+        output_layout.setSpacing(8)
+        output_layout.addWidget(self.section_label("Output"))
+        output_layout.addWidget(self.field_label("Title"))
         self.title_edit = QLineEdit()
-        title_row.addWidget(title_label)
-        title_row.addWidget(self.title_edit, 1)
-        details_layout.addLayout(title_row)
+        output_layout.addWidget(self.title_edit)
+        output_layout.addWidget(self.field_label("Save Word document as"))
         output_row = QHBoxLayout()
-        output_label = self.hint_label("Save as")
-        output_label.setFixedWidth(72)
         self.output_edit = QLineEdit()
         choose_output = QPushButton("Choose…")
         choose_output.clicked.connect(self.browse_output)
-        output_row.addWidget(output_label)
         output_row.addWidget(self.output_edit, 1)
         output_row.addWidget(choose_output)
-        details_layout.addLayout(output_row)
-        deck_row = QHBoxLayout()
-        deck_label = self.hint_label("Slide pack")
-        deck_label.setFixedWidth(72)
-        self.deck_edit = DropLineEdit()
-        self.deck_edit.setPlaceholderText("Optional PDF or PowerPoint slide pack")
-        self.deck_edit.file_dropped.connect(self.set_deck)
-        choose_deck = QPushButton("Choose…")
-        choose_deck.clicked.connect(self.browse_deck)
-        clear_deck = QPushButton("Clear")
-        clear_deck.clicked.connect(self.deck_edit.clear)
-        deck_row.addWidget(deck_label)
-        deck_row.addWidget(self.deck_edit, 1)
-        deck_row.addWidget(choose_deck)
-        deck_row.addWidget(clear_deck)
-        details_layout.addLayout(deck_row)
-        details_layout.addWidget(
+        output_layout.addLayout(output_row)
+
+        output_layout.addWidget(self.field_label("Accuracy"))
+        self.model_combo = WheelSafeComboBox()
+        self.model_combo.addItem("Maximum accuracy — Large-v3 (recommended)", "large-v3")
+        self.model_combo.addItem("Faster — Turbo", "turbo")
+        accuracy_frame = QFrame()
+        accuracy_frame.setObjectName("segmented")
+        accuracy_layout = QHBoxLayout(accuracy_frame)
+        accuracy_layout.setContentsMargins(4, 4, 4, 4)
+        accuracy_layout.setSpacing(4)
+        self.accuracy_buttons: list[QPushButton] = []
+        for index, label in enumerate(("Maximum · Large-v3", "Faster · Turbo")):
+            button = QPushButton(label)
+            button.setObjectName("segment")
+            button.setCheckable(True)
+            button.setAutoExclusive(True)
+            button.setChecked(index == 0)
+            button.clicked.connect(lambda _checked=False, i=index: self.model_combo.setCurrentIndex(i))
+            accuracy_layout.addWidget(button)
+            self.accuracy_buttons.append(button)
+        self.model_combo.currentIndexChanged.connect(
+            lambda i: self.accuracy_buttons[i].setChecked(True) if 0 <= i < len(self.accuracy_buttons) else None
+        )
+        output_layout.addWidget(accuracy_frame)
+        output_layout.addWidget(
             self.hint_label(
-                "Optional but recommended: a PDF provides exact page numbers, native text and clean "
-                "slide images. PowerPoint provides native slide text and numbering; unmatched video "
-                "frames still use local RapidOCR."
+                "Large-v3 is the most accurate for long lectures. Its first use needs a one-time "
+                "download of about 3 GB; LectureWeave+ asks before downloading."
             )
         )
-        self.whisperx_check = QCheckBox(
-            "Optional enhanced word alignment and anonymous speakers using an external WhisperX environment"
-        )
-        self.whisperx_check.setChecked(
-            self.settings.value("whisperx/enabled", False, type=bool)
-        )
+
+        advanced_toggle = self.disclosure_button("Advanced options")
+        output_layout.addWidget(advanced_toggle)
+        advanced = QWidget()
+        advanced.setVisible(False)
+        advanced_toggle.toggled.connect(advanced.setVisible)
+        advanced_layout = QVBoxLayout(advanced)
+        advanced_layout.setContentsMargins(4, 0, 0, 0)
+        advanced_layout.setSpacing(6)
+        self.reuse_check = QCheckBox("Reuse the cached transcript for this video")
+        self.reuse_check.setChecked(True)
+        self.omit_check = QCheckBox("Skip brief slide flicks (three or fewer spoken words)")
+        self.omit_check.setChecked(True)
+        self.whisperx_check = QCheckBox("WhisperX word alignment and speaker labels")
+        self.whisperx_check.setChecked(self.settings.value("whisperx/enabled", False, type=bool))
         self.whisperx_check.toggled.connect(
             lambda checked: self.settings.setValue("whisperx/enabled", checked)
         )
-        details_layout.addWidget(self.whisperx_check)
+        for check in (self.reuse_check, self.omit_check, self.whisperx_check):
+            check.setMinimumWidth(0)
+            advanced_layout.addWidget(check)
+        advanced_layout.addWidget(self.hint_label("Set up WhisperX and speaker labels in Settings."))
+        output_layout.addWidget(advanced)
+        right_column.addWidget(output_card)
+        self.configuration_cards = [video_card, deck_card, comments_card, output_card]
+
+        # Run panel: primary action, progress and results
+        run_card, run_layout = self.card()
+        self.start_button = QPushButton("Create Word document")
+        self.start_button.setObjectName("primary")
+        self.start_button.clicked.connect(self.start_processing)
+        run_layout.addWidget(self.start_button)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        self.progress.setTextVisible(False)
+        run_layout.addWidget(self.progress)
+        self.status = self.hint_label("Choose or drop a lecture recording to begin.")
+        run_layout.addWidget(self.status)
+        result_buttons = QHBoxLayout()
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setObjectName("danger")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.setVisible(False)
+        self.cancel_button.clicked.connect(self.cancel_processing)
+        self.open_button = QPushButton("Open document")
+        self.open_button.setEnabled(False)
+        self.open_button.clicked.connect(self.open_output)
+        self.folder_button = QPushButton("Open folder")
+        self.folder_button.setEnabled(False)
+        self.folder_button.clicked.connect(self.open_output_folder)
+        result_buttons.addWidget(self.cancel_button)
+        result_buttons.addStretch(1)
+        result_buttons.addWidget(self.open_button)
+        result_buttons.addWidget(self.folder_button)
+        run_layout.addLayout(result_buttons)
+        log_toggle = self.disclosure_button("Technical log")
+        run_layout.addWidget(log_toggle)
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setObjectName("log")
+        self.log.setMinimumHeight(120)
+        self.log.setVisible(False)
+        log_toggle.toggled.connect(self.log.setVisible)
+        run_layout.addWidget(self.log)
+        run_layout.addWidget(self.hint_label("Processed on this PC. Nothing is uploaded."))
+        right_column.addWidget(run_card)
+        right_column.addStretch(1)
+
+        scroll.setWidget(body)
+        central_layout.addWidget(scroll, 1)
+        self.setCentralWidget(central)
+
+        self.build_settings_dialog()
+
+        self.comment_timer = QTimer(self)
+        self.comment_timer.setSingleShot(True)
+        self.comment_timer.timeout.connect(self.update_comment_count)
+
+    @staticmethod
+    def disclosure_button(text: str) -> QPushButton:
+        button = QPushButton(f"▸  {text}")
+        button.setObjectName("disclosure")
+        button.setCheckable(True)
+        button.toggled.connect(
+            lambda checked: button.setText(f"{'▾' if checked else '▸'}  {text}")
+        )
+        return button
+
+    @staticmethod
+    def field_label(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("field")
+        return label
+
+    def build_settings_dialog(self) -> None:
+        """One-time setup lives here, away from the per-lecture inputs."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Settings — {APP_NAME}")
+        dialog.setMinimumWidth(720)
+        dialog.setStyleSheet(self.styleSheet())
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
+
+        speakers_card, speakers_layout = self.card()
+        speakers_layout.addWidget(self.section_label("Speakers and word alignment (WhisperX)"))
+        speakers_layout.addWidget(
+            self.hint_label(
+                "WhisperX is installed separately because its PyTorch models are very large. "
+                "Word alignment works without an account; anonymous speaker labels also need an "
+                "accepted pyannote model and a Hugging Face read token."
+            )
+        )
         whisperx_row = QHBoxLayout()
-        whisperx_label = self.hint_label("WhisperX")
-        whisperx_label.setFixedWidth(72)
         configured_whisperx = str(
             os.environ.get("LECTUREWEAVE_WHISPERX_PYTHON")
             or self.settings.value("whisperx/python", "")
@@ -1115,135 +1301,82 @@ class MainWindow(QMainWindow):
         )
         self.whisperx_edit = QLineEdit(configured_whisperx)
         self.whisperx_edit.setReadOnly(True)
-        self.whisperx_edit.setPlaceholderText("Optional Python executable containing WhisperX")
+        self.whisperx_edit.setPlaceholderText("Automatic (Python executable containing WhisperX)")
         choose_whisperx = QPushButton("Choose Python…")
         choose_whisperx.clicked.connect(self.browse_whisperx)
         install_whisperx = QPushButton("Install / repair")
         install_whisperx.clicked.connect(self.install_or_repair_whisperx)
-        whisperx_row.addWidget(whisperx_label)
         whisperx_row.addWidget(self.whisperx_edit, 1)
         whisperx_row.addWidget(choose_whisperx)
         whisperx_row.addWidget(install_whisperx)
-        details_layout.addLayout(whisperx_row)
+        speakers_layout.addLayout(whisperx_row)
         whisperx_status_row = QHBoxLayout()
         self.whisperx_status = QLabel("Checking WhisperX setup…")
         self.whisperx_status.setWordWrap(True)
         check_whisperx = QPushButton("Check setup")
         check_whisperx.clicked.connect(self.refresh_whisperx_status)
         reset_whisperx = QPushButton("Reset path")
+        reset_whisperx.setObjectName("quiet")
         reset_whisperx.clicked.connect(self.reset_whisperx_path)
-        whisperx_status_row.addSpacing(78)
         whisperx_status_row.addWidget(self.whisperx_status, 1)
         whisperx_status_row.addWidget(check_whisperx)
         whisperx_status_row.addWidget(reset_whisperx)
-        details_layout.addLayout(whisperx_status_row)
+        speakers_layout.addLayout(whisperx_status_row)
+
+        speakers_layout.addWidget(self.field_label("Hugging Face read token"))
         token_row = QHBoxLayout()
-        token_label = self.hint_label("HF token")
-        token_label.setFixedWidth(72)
         self.hf_token_edit = QLineEdit()
         self.hf_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.hf_token_edit.setPlaceholderText("Paste a Hugging Face read token beginning with hf_")
+        self.hf_token_edit.setPlaceholderText("Paste a token beginning with hf_")
         self.save_token_button = QPushButton("Save / replace")
         self.save_token_button.clicked.connect(self.save_hf_token)
         test_token = QPushButton("Test access")
         test_token.clicked.connect(self.test_hf_token_access)
         remove_token = QPushButton("Reset token")
+        remove_token.setObjectName("quiet")
         remove_token.clicked.connect(self.remove_hf_token)
-        token_row.addWidget(token_label)
         token_row.addWidget(self.hf_token_edit, 1)
         token_row.addWidget(self.save_token_button)
         token_row.addWidget(test_token)
         token_row.addWidget(remove_token)
-        details_layout.addLayout(token_row)
-        token_status_row = QHBoxLayout()
-        token_status_row.addSpacing(78)
+        speakers_layout.addLayout(token_row)
         self.hf_token_status = QLabel("")
         self.hf_token_status.setWordWrap(True)
-        token_status_row.addWidget(self.hf_token_status, 1)
-        details_layout.addLayout(token_status_row)
+        speakers_layout.addWidget(self.hf_token_status)
+        speakers_layout.addWidget(
+            self.hint_label("The token is stored securely in Windows Credential Manager, never in settings or output files.")
+        )
+        layout.addWidget(speakers_card)
         self.refresh_hf_token_status()
-        details_layout.addWidget(
-            self.hint_label(
-                "WhisperX is deliberately separate because its PyTorch models are very large. "
-                "Word alignment works without an account; anonymous speaker labels additionally require "
-                "an accepted pyannote model and a saved Hugging Face read token. The token is stored "
-                "securely in Windows Credential Manager."
-            )
-        )
-        quality_row = QHBoxLayout()
-        quality_label = self.hint_label("Accuracy")
-        quality_label.setFixedWidth(72)
-        self.model_combo = WheelSafeComboBox()
-        self.model_combo.addItem("Maximum accuracy — Large-v3 (recommended)", "large-v3")
-        self.model_combo.addItem("Faster — Turbo", "turbo")
-        quality_row.addWidget(quality_label)
-        quality_row.addWidget(self.model_combo, 1)
-        details_layout.addLayout(quality_row)
-        details_layout.addWidget(
-            self.hint_label(
-                "Large-v3 gives the best transcript accuracy for long lectures. Its first use "
-                "requires an approximately 3 GB download; LectureWeave+ will ask before downloading it."
-            )
-        )
-        self.reuse_check = QCheckBox(
-            "Reuse a cached local transcript when this exact video has already been processed"
-        )
-        self.reuse_check.setChecked(True)
-        self.omit_check = QCheckBox(
-            "Omit brief slide flicks with three or fewer spoken words (recommended)"
-        )
-        self.omit_check.setChecked(True)
-        details_layout.addWidget(self.reuse_check)
-        details_layout.addWidget(self.omit_check)
-        body_layout.addWidget(details_card)
-        self.configuration_cards = [video_card, comments_card, details_card]
 
-        action_card, action_layout = self.card()
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 1)
-        self.progress.setValue(0)
-        self.progress.setTextVisible(False)
-        action_layout.addWidget(self.progress)
-        self.status = self.hint_label("Choose or drop a lecture recording to begin.")
-        action_layout.addWidget(self.status)
-        self.log = QTextEdit()
-        self.log.setReadOnly(True)
-        self.log.setMinimumHeight(105)
-        self.log.setMaximumHeight(145)
-        self.log.setStyleSheet("font-family: Consolas; font-size: 9pt; background: #FAF9FC;")
-        action_layout.addWidget(self.log)
-        buttons = QHBoxLayout()
-        self.start_button = QPushButton("Create Word document")
-        self.start_button.setObjectName("primary")
-        self.start_button.clicked.connect(self.start_processing)
-        self.cancel_button = QPushButton("Cancel generation")
-        self.cancel_button.setEnabled(False)
-        self.cancel_button.clicked.connect(self.cancel_processing)
-        self.open_button = QPushButton("Open finished document")
-        self.open_button.setEnabled(False)
-        self.open_button.clicked.connect(self.open_output)
-        self.folder_button = QPushButton("Open output folder")
-        self.folder_button.setEnabled(False)
-        self.folder_button.clicked.connect(self.open_output_folder)
+        updates_card, updates_layout = self.card()
+        updates_row = QHBoxLayout()
+        updates_text = QVBoxLayout()
+        updates_text.addWidget(self.section_label("Updates"))
+        updates_text.addWidget(
+            self.hint_label(f"Version {APP_VERSION} · checksum-verified installers from GitHub releases")
+        )
+        updates_row.addLayout(updates_text, 1)
         self.update_button = QPushButton("Check for updates")
         self.update_button.clicked.connect(self.check_for_updates)
-        buttons.addWidget(self.start_button)
-        buttons.addWidget(self.cancel_button)
-        buttons.addWidget(self.open_button)
-        buttons.addWidget(self.folder_button)
-        buttons.addWidget(self.update_button)
-        buttons.addStretch(1)
-        action_layout.addLayout(buttons)
-        body_layout.addWidget(action_card)
-        body_layout.addStretch(1)
+        updates_row.addWidget(self.update_button)
+        updates_layout.addLayout(updates_row)
+        layout.addWidget(updates_card)
 
-        scroll.setWidget(body)
-        central_layout.addWidget(scroll, 1)
-        self.setCentralWidget(central)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        self.settings_dialog = dialog
 
-        self.comment_timer = QTimer(self)
-        self.comment_timer.setSingleShot(True)
-        self.comment_timer.timeout.connect(self.update_comment_count)
+    def open_settings(self) -> None:
+        self.settings_dialog.exec()
+
+    def paste_comments(self) -> None:
+        text = QApplication.clipboard().text()
+        if text.strip():
+            self.comments_edit.setPlainText(text)
+        else:
+            self.status.setText("The clipboard does not contain any text to paste.")
 
     def browse_video(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
@@ -1532,7 +1665,9 @@ class MainWindow(QMainWindow):
             card.setEnabled(not active)
         self.start_button.setEnabled(not active)
         self.cancel_button.setEnabled(active)
+        self.cancel_button.setVisible(active)
         self.update_button.setEnabled(not active)
+        self.settings_button.setEnabled(not active)
 
     def cancel_processing(self) -> None:
         if not self.worker or not self.worker.isRunning():
