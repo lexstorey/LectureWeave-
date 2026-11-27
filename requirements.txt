@@ -1,5 +1,6 @@
 av>=16
 faster-whisper==1.2.1
+hf_xet>=1.1,<2
 numpy>=2.0
 opencv-python-headless>=4.10
 Pillow>=11.0

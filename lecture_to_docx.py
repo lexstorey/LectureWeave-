@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import argparse
 import html
+import io
 import json
+import logging
 import math
 import os
 from pathlib import Path
 import re
 import sys
-from typing import Any
+import time
+from typing import Any, Callable
 
 ROOT = Path(__file__).resolve().parent
 VENDOR = ROOT / "vendor"
@@ -35,6 +38,8 @@ LEGAL_PROMPT = (
     "Safety Act, Burial and Cremation Act, interlocutory, jurisdiction, legislation, statute, "
     "tribunal, registrar, mediator and conciliator."
 )
+
+ProgressCallback = Callable[[str, int, int, str], None]
 
 
 def format_time(seconds: float, include_ms: bool = False) -> str:
@@ -164,6 +169,7 @@ def detect_slides(
     output_dir: Path,
     threshold: float = 2.0,
     minimum_duration: float = 2.5,
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[list[dict[str, Any]], float]:
     output_dir.mkdir(parents=True, exist_ok=True)
     cap = cv2.VideoCapture(str(video_path))
@@ -177,6 +183,8 @@ def detect_slides(
     samples: list[dict[str, Any]] = []
     previous: np.ndarray | None = None
     frame_index = 0
+    candidate_count = 0
+    last_reported_percent = -1
     while True:
         ok = cap.grab()
         if not ok:
@@ -188,6 +196,8 @@ def detect_slides(
             second = frame_index / fps
             sig = signature(frame)
             diff = 0.0 if previous is None else signature_difference(previous, sig)
+            if previous is not None and diff >= threshold:
+                candidate_count += 1
             samples.append(
                 {
                     "second": second,
@@ -197,8 +207,25 @@ def detect_slides(
                 }
             )
             previous = sig
+            percent = min(100, int(frame_index * 100 / max(1, frame_count)))
+            if progress_callback and percent != last_reported_percent:
+                progress_callback(
+                    "slide_scan",
+                    frame_index,
+                    frame_count,
+                    f"Scanning slides — {format_time(second)} of {format_time(duration)} "
+                    f"({percent}%) · {candidate_count} possible changes",
+                )
+                last_reported_percent = percent
         frame_index += 1
     cap.release()
+    if progress_callback:
+        progress_callback(
+            "slide_scan",
+            frame_count,
+            frame_count,
+            f"Slide scan complete — reviewing {candidate_count} possible changes…",
+        )
 
     boundaries = [0.0]
     boundaries.extend(sample["second"] for sample in samples[1:] if sample["difference"] >= threshold)
@@ -248,7 +275,14 @@ def detect_slides(
 
     cap = cv2.VideoCapture(str(video_path))
     manifest: list[dict[str, Any]] = []
-    for item in merged:
+    for capture_index, item in enumerate(merged, 1):
+        if progress_callback:
+            progress_callback(
+                "slide_capture",
+                capture_index - 1,
+                len(merged),
+                f"Saving clean slide images — {capture_index} of {len(merged)}",
+            )
         frame = crop_pillarbox(extract_frame(cap, item["capture_time"]))
         image_name = f"slide_{item['index']:03d}_{int(item['start']):06d}.jpg"
         image_path = output_dir / image_name
@@ -264,8 +298,127 @@ def detect_slides(
             }
         )
     cap.release()
+    if progress_callback:
+        progress_callback(
+            "slide_capture",
+            len(merged),
+            len(merged),
+            f"Detected {len(merged)} stable slide appearances.",
+        )
     (output_dir / "slides.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest, duration
+
+
+def whisper_model_files_complete(model_dir: Path) -> bool:
+    required = ("config.json", "model.bin", "tokenizer.json")
+    return all((model_dir / name).is_file() and (model_dir / name).stat().st_size > 0 for name in required)
+
+
+def prepare_whisper_model(
+    model_name: str,
+    models_dir: Path,
+    progress_callback: ProgressCallback | None = None,
+) -> Path:
+    """Download or repair a local Faster Whisper model and verify required files."""
+    from faster_whisper.utils import _MODELS
+    from huggingface_hub import snapshot_download
+    from tqdm.auto import tqdm
+
+    repo_id = model_name if "/" in model_name else _MODELS.get(model_name)
+    if not repo_id:
+        raise ValueError(f"Unknown Whisper model: {model_name}")
+    repo_cache = models_dir / ("models--" + repo_id.replace("/", "--"))
+    snapshots_dir = repo_cache / "snapshots"
+    if snapshots_dir.is_dir():
+        snapshots = sorted(
+            (path for path in snapshots_dir.iterdir() if path.is_dir()),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for snapshot in snapshots:
+            if whisper_model_files_complete(snapshot):
+                if progress_callback:
+                    progress_callback(
+                        "model",
+                        1,
+                        1,
+                        f"Using the cached Whisper {model_name} speech model.",
+                    )
+                return snapshot
+
+    repairing = repo_cache.exists()
+    action = "Repairing an incomplete" if repairing else "Downloading"
+    if progress_callback:
+        progress_callback(
+            "model_download",
+            0,
+            0,
+            f"{action} Whisper {model_name} model — this one-time download can take several minutes…",
+        )
+
+    callback = progress_callback
+
+    class ModelDownloadProgress(tqdm):
+        def __init__(self, *args, **kwargs):
+            kwargs["file"] = io.StringIO()
+            kwargs["leave"] = False
+            super().__init__(*args, **kwargs)
+
+        def update(self, amount=1):
+            result = super().update(amount)
+            if callback and self.total:
+                current = int(self.n)
+                total = int(self.total)
+                percent = min(100, int(current * 100 / max(1, total)))
+                label = str(self.desc or "model files").strip()
+                callback(
+                    "model_download",
+                    current,
+                    total,
+                    f"Downloading speech model — {label}: "
+                    f"{current / 1048576:.0f} of {total / 1048576:.0f} MB ({percent}%)",
+                )
+            return result
+
+    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+    allow_patterns = (
+        "config.json",
+        "preprocessor_config.json",
+        "model.bin",
+        "tokenizer.json",
+        "vocabulary.*",
+    )
+    last_error: Exception | None = None
+    for force_download in (False, True):
+        try:
+            snapshot_path = Path(snapshot_download(
+                repo_id,
+                cache_dir=str(models_dir),
+                allow_patterns=allow_patterns,
+                max_workers=1,
+                force_download=force_download,
+                tqdm_class=ModelDownloadProgress,
+            ))
+            if whisper_model_files_complete(snapshot_path):
+                if progress_callback:
+                    progress_callback(
+                        "model_download",
+                        1,
+                        1,
+                        f"Whisper {model_name} model is ready.",
+                    )
+                return snapshot_path
+            last_error = RuntimeError("required model files are still missing")
+        except Exception as exc:
+            last_error = exc
+            if progress_callback and not force_download:
+                progress_callback(
+                    "model_download",
+                    0,
+                    0,
+                    "The first model download was incomplete; retrying the missing files…",
+                )
+    raise RuntimeError(f"Could not download a complete Whisper model: {last_error}")
 
 
 def transcribe(
@@ -273,6 +426,7 @@ def transcribe(
     work_dir: Path,
     model_name: str,
     model_cache: Path | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     # PyAV 19 removed the ``metadata_errors`` keyword while some Faster Whisper
     # releases still pass it.  Keep the tool usable with either PyAV API.
@@ -295,17 +449,25 @@ def transcribe(
 
     models_dir = model_cache or (work_dir / "models")
     models_dir.mkdir(parents=True, exist_ok=True)
+    model_path = prepare_whisper_model(model_name, models_dir, progress_callback)
     initial_prompt = LEGAL_PROMPT
     attempts = [("cuda", "float16"), ("cpu", "int8")]
     last_error: Exception | None = None
     for device, compute_type in attempts:
         try:
+            device_label = "NVIDIA GPU" if device == "cuda" else "CPU"
+            if progress_callback:
+                progress_callback(
+                    "model",
+                    0,
+                    0,
+                    f"Loading Whisper {model_name} on {device_label}…",
+                )
             print(f"Loading Whisper model {model_name} on {device} ({compute_type})", flush=True)
             model = WhisperModel(
-                model_name,
+                str(model_path),
                 device=device,
                 compute_type=compute_type,
-                download_root=str(models_dir),
             )
             iterator, info = model.transcribe(
                 str(video_path),
@@ -316,18 +478,60 @@ def transcribe(
                 condition_on_previous_text=True,
                 initial_prompt=initial_prompt,
             )
-            segments = [
-                {
+            if progress_callback:
+                progress_callback(
+                    "transcribe",
+                    0,
+                    max(1, int(info.duration * 1000)),
+                    f"Transcribing on {device_label} — starting audio analysis…",
+                )
+            segments: list[dict[str, Any]] = []
+            started = time.monotonic()
+            last_reported = started
+            for segment in iterator:
+                if not segment.text.strip():
+                    continue
+                segments.append({
                     "start": float(segment.start),
                     "end": float(segment.end),
                     "text": re.sub(r"\s+", " ", segment.text).strip(),
-                }
-                for segment in iterator
-                if segment.text.strip()
-            ]
+                })
+                now = time.monotonic()
+                if progress_callback and (now - last_reported >= 0.5 or segment.end >= info.duration):
+                    processed = min(float(segment.end), float(info.duration))
+                    percent = min(100, int(processed * 100 / max(0.001, info.duration)))
+                    elapsed = max(0.001, now - started)
+                    speed = processed / elapsed
+                    if processed >= 30 and speed > 0:
+                        eta = max(0, (info.duration - processed) / speed)
+                        remaining = f" · about {format_time(eta)} remaining"
+                    else:
+                        remaining = " · estimating time remaining"
+                    progress_callback(
+                        "transcribe",
+                        int(processed * 1000),
+                        max(1, int(info.duration * 1000)),
+                        f"Transcribing on {device_label} — {format_time(processed)} of "
+                        f"{format_time(info.duration)} ({percent}%){remaining}",
+                    )
+                    last_reported = now
+            if progress_callback:
+                progress_callback(
+                    "transcribe",
+                    max(1, int(info.duration * 1000)),
+                    max(1, int(info.duration * 1000)),
+                    f"Transcription complete — {len(segments)} speech segments detected.",
+                )
             return segments, device
         except Exception as exc:
             last_error = exc
+            if progress_callback and device == "cuda":
+                progress_callback(
+                    "model",
+                    0,
+                    0,
+                    "NVIDIA transcription was unavailable; switching automatically to CPU…",
+                )
             print(f"Whisper attempt on {device} failed: {exc}", file=sys.stderr, flush=True)
     raise RuntimeError(f"Transcription failed: {last_error}")
 
@@ -552,6 +756,7 @@ def build_docx(
     transcription_device: str,
     title_text: str,
     omitted_slide_count: int = 0,
+    progress_callback: ProgressCallback | None = None,
 ) -> None:
     document = Document()
     section = document.sections[0]
@@ -614,6 +819,13 @@ def build_docx(
     add_page_number(footer)
 
     for slide_position, slide in enumerate(slides):
+        if progress_callback:
+            progress_callback(
+                "export",
+                slide_position,
+                len(slides),
+                f"Building Word document — slide {slide_position + 1} of {len(slides)}",
+            )
         document.add_page_break()
         heading = document.add_paragraph(style="Heading 1")
         heading.add_run(f"Slide {slide_position + 1}  {format_time(slide['start'])}")
@@ -658,6 +870,13 @@ def build_docx(
             paragraph.add_run(event["text"])
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if progress_callback:
+        progress_callback(
+            "export",
+            len(slides),
+            len(slides),
+            "Saving and finalising the Word document…",
+        )
     document.save(output_path)
 
 

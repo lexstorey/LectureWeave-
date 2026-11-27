@@ -45,7 +45,7 @@ from lecture_to_docx import (
 
 
 APP_NAME = "LectureWeave+"
-APP_VERSION = "0.2.2"
+APP_VERSION = "0.2.3"
 REPOSITORY_URL = "https://github.com/lexstorey/LectureWeave-"
 LATEST_RELEASE_API = "https://api.github.com/repos/lexstorey/LectureWeave-/releases/latest"
 PURPLE = "#4A148C"
@@ -236,6 +236,7 @@ class UpdateDownloadThread(QThread):
 
 class ProcessingThread(QThread):
     status = Signal(str)
+    progress = Signal(int, int)
     log = Signal(str)
     completed = Signal(str)
     failed = Signal(str)
@@ -257,6 +258,14 @@ class ProcessingThread(QThread):
         self.reuse_transcript = reuse_transcript
         self.omit_brief_slides = omit_brief_slides
 
+    def report_progress(self, stage: str, current: int, total: int, detail: str) -> None:
+        self.status.emit(detail)
+        if total > 0:
+            scaled = min(1000, max(0, int(current * 1000 / total)))
+            self.progress.emit(scaled, 1000)
+        else:
+            self.progress.emit(0, 0)
+
     def run(self) -> None:
         app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
         cache_root = app_data / "LectureTranscriptSlides"
@@ -275,7 +284,11 @@ class ProcessingThread(QThread):
         try:
             with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
                 self.status.emit("Detecting stable slide changes…")
-                slides, duration = detect_slides(self.video, slides_dir)
+                slides, duration = detect_slides(
+                    self.video,
+                    slides_dir,
+                    progress_callback=self.report_progress,
+                )
                 print(f"Detected {len(slides)} stable slide appearances")
 
                 transcript_json = transcript_dir / "transcript.json"
@@ -283,6 +296,7 @@ class ProcessingThread(QThread):
                     self.status.emit("Loading the cached local transcript…")
                     segments = json.loads(transcript_json.read_text(encoding="utf-8"))
                     device = "reused"
+                    self.progress.emit(1, 1)
                     print(f"Loaded {len(segments)} cached speech segments")
                 else:
                     self.status.emit(
@@ -293,10 +307,17 @@ class ProcessingThread(QThread):
                         work_dir,
                         "turbo",
                         model_cache=model_cache,
+                        progress_callback=self.report_progress,
                     )
                     write_transcript_files(segments, transcript_dir)
                     print(f"Transcribed {len(segments)} timestamped speech segments")
 
+                self.report_progress(
+                    "alignment",
+                    0,
+                    0,
+                    f"Aligning {len(segments)} speech segments and {len(self.comments)} chat comments…",
+                )
                 align_segments(slides, segments, self.comments)
                 omitted_slides: list[dict] = []
                 if self.omit_brief_slides:
@@ -335,6 +356,7 @@ class ProcessingThread(QThread):
                     device,
                     self.title,
                     len(omitted_slides),
+                    progress_callback=self.report_progress,
                 )
                 print(f"Imported {len(self.comments)} chat comments")
                 print(f"Created {self.output}")
@@ -674,10 +696,18 @@ class MainWindow(QMainWindow):
             self.omit_check.isChecked(),
         )
         self.worker.status.connect(self.status.setText)
+        self.worker.progress.connect(self.processing_progress)
         self.worker.log.connect(self.append_log)
         self.worker.completed.connect(self.processing_complete)
         self.worker.failed.connect(self.processing_failed)
         self.worker.start()
+
+    def processing_progress(self, current: int, total: int) -> None:
+        if total > 0:
+            self.progress.setRange(0, total)
+            self.progress.setValue(current)
+        else:
+            self.progress.setRange(0, 0)
 
     def append_log(self, message: str) -> None:
         self.log.append(message)
@@ -839,6 +869,10 @@ def run_self_test() -> int:
         return 7
     if release_asset_sha256("sha256:" + "a" * 64) != "a" * 64:
         return 8
+    try:
+        import hf_xet  # noqa: F401
+    except ImportError:
+        return 9
     return 0
 
 

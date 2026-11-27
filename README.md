@@ -19,6 +19,8 @@ machine-generated transcript text and optional chat comments.
 - Word document generation with slide images and aligned transcript text
 - Cached transcripts for faster regeneration
 - CPU fallback and NVIDIA CUDA acceleration when available
+- Live slide-scan, model-download, transcription and export progress with ETA
+- Automatic resume and repair of incomplete Whisper model downloads
 - One-click, checksum-verified updates from official GitHub releases
 
 ## Installing and updating
