@@ -52,6 +52,7 @@ from content_enrichment import (
     match_deck_pages,
     run_slide_ocr,
     transcription_vocabulary,
+    unreliable_deck_text,
 )
 from credential_store import (
     delete_huggingface_token,
@@ -82,7 +83,7 @@ from lecture_to_docx import (
 
 
 APP_NAME = "LectureWeave+"
-APP_VERSION = "0.4.2"
+APP_VERSION = "0.4.3"
 REPOSITORY_URL = "https://github.com/lexstorey/LectureWeave-"
 PURPLE = "#4A148C"
 PURPLE_DARK = "#32105D"
@@ -401,6 +402,34 @@ class UpdateDownloadThread(QThread):
             self.failed.emit(f"Could not download the update: {exc}")
 
 
+def bundle_outputs(zip_path: Path, files: list[Path]) -> Path:
+    """Put a run's files in one zip next to them, then remove the loose copies.
+
+    Entry names are kept short so extracting stays within Windows path limits.
+    """
+    import zipfile
+
+    staging = zip_path.with_name(f".{zip_path.stem}.lectureweave-partial.zip")
+    with zipfile.ZipFile(staging, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        used: set[str] = set()
+        for path in files:
+            if not path.is_file():
+                continue
+            stem = path.stem[:80].rstrip(" .")
+            name = f"{stem}{path.suffix}"
+            counter = 2
+            while name.casefold() in used:
+                name = f"{stem} ({counter}){path.suffix}"
+                counter += 1
+            used.add(name.casefold())
+            archive.write(path, name)
+    os.replace(staging, zip_path)
+    for path in files:
+        if path.is_file() and path != zip_path:
+            path.unlink()
+    return zip_path
+
+
 class ProcessingThread(QThread):
     status = Signal(str)
     progress = Signal(int, int)
@@ -428,6 +457,7 @@ class ProcessingThread(QThread):
         write_pack: bool = True,
         write_docx: bool = True,
         pseudonymise: bool = True,
+        bundle_zip: bool = False,
     ) -> None:
         super().__init__()
         self.video = video
@@ -444,6 +474,7 @@ class ProcessingThread(QThread):
         self.write_pack = write_pack
         self.write_docx = write_docx
         self.pseudonymise = pseudonymise
+        self.bundle_zip = bundle_zip
         self.result_files: list[Path] = []
         self.result_notes: list[str] = []
         self.whisperx_python = whisperx_python
@@ -533,6 +564,14 @@ class ProcessingThread(QThread):
                 run_slide_ocr(slides, self.report_progress)
                 if deck_pages:
                     match_deck_pages(slides, deck_pages)
+                    for label in sorted(unreliable_deck_text(slides)):
+                        print(
+                            f"Deck {label}'s PDF text layer does not match the slides on screen "
+                            "(a broken font encoding); using the text read from the video instead"
+                        )
+                        for deck in deck_summaries:
+                            if deck["label"] == label:
+                                deck["unreadable_text"] = True
                     matched = sum(bool(slide.get("deck_slide_number")) for slide in slides)
                     print(
                         f"Matched {matched} of {len(slides)} video appearances to "
@@ -693,7 +732,13 @@ class ProcessingThread(QThread):
                     self.result_files.append(pack_path)
                     if visual_labels:
                         self.result_files.append(visuals_path)
-                    self.result_files.append(write_claude_instructions(pack_path.parent))
+                    if self.bundle_zip:
+                        instructions = work_dir / "bundle" / "CLAUDE_INSTRUCTIONS.md"
+                        instructions.parent.mkdir(parents=True, exist_ok=True)
+                        instructions.unlink(missing_ok=True)
+                        self.result_files.append(write_claude_instructions(instructions.parent))
+                    else:
+                        self.result_files.append(write_claude_instructions(pack_path.parent))
                     self.result_notes.append(
                         f"Claude pack: about {summary['approx_tokens']:,} tokens, "
                         f"{summary['slides']} slide spans, {summary['off_slide']} off-slide segment(s), "
@@ -721,8 +766,15 @@ class ProcessingThread(QThread):
                     self.result_files.insert(0, self.output)
                     print(f"Created {self.output}")
                 print(f"Imported {len(self.comments)} chat comments")
+                if self.bundle_zip and self.result_files:
+                    bundle = bundle_outputs(self.output.with_suffix(".zip"), self.result_files)
+                    self.result_files = [bundle]
+                    print(f"Bundled the files into {bundle}")
             writer.flush()
-            primary = self.output if self.write_docx else self.output.with_suffix(".md")
+            primary = (
+                self.output.with_suffix(".zip") if self.bundle_zip
+                else self.output if self.write_docx else self.output.with_suffix(".md")
+            )
             self.completed.emit(str(primary))
         except ProcessingCancelled:
             writer.flush()
@@ -1287,8 +1339,12 @@ class MainWindow(QMainWindow):
         self.docx_check = QCheckBox("Word reading copy (.docx) — slide images and transcript")
         self.docx_check.setChecked(self.settings.value("output/docx", True, type=bool))
         self.docx_check.toggled.connect(lambda checked: self.settings.setValue("output/docx", checked))
+        self.zip_check = QCheckBox("Bundle everything into one .zip")
+        self.zip_check.setChecked(self.settings.value("output/zip", True, type=bool))
+        self.zip_check.toggled.connect(lambda checked: self.settings.setValue("output/zip", checked))
         output_layout.addWidget(self.pack_check)
         output_layout.addWidget(self.docx_check)
+        output_layout.addWidget(self.zip_check)
         output_layout.addWidget(self.field_label("Save as"))
         output_row = QHBoxLayout()
         self.output_edit = QLineEdit()
@@ -1971,6 +2027,7 @@ class MainWindow(QMainWindow):
             write_pack=self.pack_check.isChecked(),
             write_docx=self.docx_check.isChecked(),
             pseudonymise=self.pseudonymise_check.isChecked(),
+            bundle_zip=self.zip_check.isChecked(),
         )
         self.worker.status.connect(self.status.setText)
         self.worker.progress.connect(self.processing_progress)

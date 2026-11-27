@@ -60,7 +60,9 @@ def xml_safe_text(value: str) -> str:
     PDF text layers use U+0002 for a hyphen inserted at a line break and can
     contain other control characters; python-docx rejects all of them.
     """
-    return _CONTROL_CHARACTERS.sub("", str(value).replace("\x02", "-"))
+    return _CONTROL_CHARACTERS.sub(
+        "", str(value).replace("\x02", "-").replace("\ufffe", "-")
+    )
 
 
 def _clean_strings(value: Any) -> Any:

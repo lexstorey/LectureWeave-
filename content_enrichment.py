@@ -30,7 +30,11 @@ class DeckPage:
 
 
 def normalise_slide_text(text: str) -> str:
-    text = re.sub(r"[\x00-\x01\x03-\x08\x0b\x0e-\x1f\x7f]", "", str(text)).replace("\x02", "-")
+    text = re.sub(
+        r"[\x00-\x01\x03-\x08\x0b\x0e-\x1f\x7f\uffff]",
+        "",
+        str(text).replace("\x02", "-").replace("\ufffe", "-"),
+    )
     lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
     return "\n".join(line for line in lines if line)
 
@@ -120,6 +124,7 @@ def _smoothed_histogram_similarity(left: np.ndarray, right: np.ndarray) -> float
 
 def _assign_page(slide: dict[str, Any], page: DeckPage, source: str, confidence: str,
                  alternative: DeckPage | None = None) -> None:
+    slide.setdefault("ocr_text", slide.get("slide_text", ""))
     slide["deck_slide_number"] = page.number
     slide["deck_label"] = page.deck
     slide["deck_text"] = page.text
@@ -225,6 +230,44 @@ def match_deck_pages(slides: list[dict[str, Any]], pages: list[DeckPage]) -> Non
             _assign_page(slide, page, "supplied PowerPoint text", "low")
 
 
+def _words(text: str) -> list[str]:
+    return [word for word in re.findall(r"[a-z]{3,}", text.casefold())]
+
+
+def unreliable_deck_text(slides: list[dict[str, Any]]) -> set[str]:
+    """Find decks whose PDF text layer does not match what is on screen.
+
+    Some exported PDFs map glyphs wrongly (every "o" read as "i", say), so
+    "Procedural" comes out as "Pricedural". For each deck, compare the words
+    in its text layer with the words OCR read from the matching video frames.
+    A good text layer shares most of its words with the OCR; a broken one
+    shares far fewer. Matched slides of such decks fall back to the OCR text.
+    """
+    overlaps: dict[str, list[float]] = {}
+    for slide in slides:
+        if not slide.get("deck_slide_number"):
+            continue
+        deck_words = _words(str(slide.get("deck_text", "")))
+        ocr_words = set(_words(str(slide.get("ocr_text", ""))))
+        if len(deck_words) < 4 or len(ocr_words) < 4:
+            continue
+        shared = sum(word in ocr_words for word in deck_words) / len(deck_words)
+        overlaps.setdefault(str(slide.get("deck_label", "A")), []).append(shared)
+    unreliable: set[str] = set()
+    for deck, values in overlaps.items():
+        values.sort()
+        if len(values) >= 3 and values[len(values) // 2] < 0.6:
+            unreliable.add(deck)
+    for slide in slides:
+        if str(slide.get("deck_label", "")) in unreliable and slide.get("deck_slide_number"):
+            ocr = str(slide.get("ocr_text", "")).strip()
+            if ocr:
+                slide["deck_text"] = ocr
+                slide["slide_text"] = ocr
+                slide["text_source"] = "video OCR (deck text layer unreadable)"
+    return unreliable
+
+
 def slide_reference(slide: dict[str, Any], multiple_decks: bool) -> str | None:
     """Human label for a matched slide, e.g. "Deck B slide 12" or "Deck slide 12"."""
     number = slide.get("deck_slide_number")
@@ -260,6 +303,8 @@ def run_slide_ocr(
             text = normalise_slide_text("\n".join(result.txts or ()))
             canonical_text[canonical] = text
         slide["slide_text"] = text
+        if not slide.get("deck_text"):
+            slide["ocr_text"] = text
         slide.setdefault("text_source", "RapidOCR")
     if progress_callback:
         progress_callback("ocr", len(slides), len(slides), "Slide text extraction complete.")

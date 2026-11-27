@@ -332,7 +332,11 @@ def terms_index(
         found = [match.group(0) for match in acronym.finditer(text)]
         found += [match.group(0) for match in phrase.finditer(text)]
         for term in found:
-            term = re.sub(r"^(?:The|A|An)\s+(?=[A-Z])", "", re.sub(r"\s+", " ", term).strip())
+            term = re.sub(r"\s+", " ", term).strip()
+            words = term.split()
+            while len(words) > 1 and words[0].casefold() in COMMON_WORDS | {"a", "an", "so", "and", "but", "now", "well"}:
+                words = words[1:]
+            term = " ".join(words)
             if " " not in term and not term.isupper():
                 continue
             if term in {"I", "OK", "TV", "AM", "PM"}:
@@ -540,7 +544,9 @@ def build_claude_pack(
             body.append("")
 
     deck_text = " · ".join(
-        f'{deck["label"]} = {deck["name"]} ({deck["pages"]} slides)' for deck in decks
+        f'{deck["label"]} = {deck["name"]} ({deck["pages"]} slides)'
+        + (" — text layer unreadable, slide text read from the video" if deck.get("unreadable_text") else "")
+        for deck in decks
     ) or "none supplied (slide text read from the video with OCR)"
     speaker_text = (
         ", ".join(speakers) + " (automatic labels; names not assigned)"
@@ -579,7 +585,11 @@ def build_claude_pack(
     ]
     output_path.parent.mkdir(parents=True, exist_ok=True)
     content = "\n".join(header + body).rstrip() + "\n"
-    content = re.sub(r"[\x00-\x01\x03-\x08\x0b\x0c\x0e-\x1f\x7f]", "", content.replace("\x02", "-"))
+    content = re.sub(
+        r"[\x00-\x01\x03-\x08\x0b\x0c\x0e-\x1f\x7f\uffff]",
+        "",
+        content.replace("\x02", "-").replace("\ufffe", "-"),
+    )
     output_path.write_text(content, encoding="utf-8")
     text = output_path.read_text(encoding="utf-8")
     return {

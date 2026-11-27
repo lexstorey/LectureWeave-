@@ -94,7 +94,18 @@ if token:
     # Speaker labels are optional: a failure here must not discard the word
     # alignment that has already finished.
     try:
-        diarizer = DiarizationPipeline(token=token, device=device)
+        try:
+            diarizer = DiarizationPipeline(token=token, device=device)
+        except OSError:
+            # On some Windows set-ups the Hugging Face cache stores files as
+            # links that cannot be opened ("Invalid argument"). Download real
+            # copies into a plain folder and load the pipeline from there.
+            from huggingface_hub import snapshot_download
+            local = Path(os.environ.get("HF_HOME", ".")) / "local" / "speaker-diarization-community-1"
+            snapshot_download(
+                "pyannote/speaker-diarization-community-1", local_dir=str(local), token=token
+            )
+            diarizer = DiarizationPipeline(model_name=str(local), token=token, device=device)
         turns = diarizer(audio)
         aligned = whisperx.assign_word_speakers(turns, aligned)
     except Exception as exc:
