@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import time
 from typing import Any, Callable
@@ -311,7 +312,63 @@ def detect_slides(
 
 def whisper_model_files_complete(model_dir: Path) -> bool:
     required = ("config.json", "model.bin", "tokenizer.json")
-    return all((model_dir / name).is_file() and (model_dir / name).stat().st_size > 0 for name in required)
+    try:
+        return all(
+            (model_dir / name).is_file() and (model_dir / name).stat().st_size > 0
+            for name in required
+        )
+    except OSError:
+        return False
+
+
+def materialize_whisper_snapshot(snapshot: Path, destination: Path, repo_cache: Path) -> bool:
+    """Create a link-free model directory from a Hugging Face snapshot.
+
+    Hugging Face snapshots use symbolic links on Windows. Packaged applications
+    can reject those reparse points with WinError 448, so this creates ordinary
+    hard links to the underlying blob files instead. Hard links use no additional
+    model-sized disk space and are safe for CTranslate2 to open.
+    """
+    names = (
+        "config.json",
+        "preprocessor_config.json",
+        "model.bin",
+        "tokenizer.json",
+        "vocabulary.json",
+        "vocabulary.txt",
+    )
+    destination.mkdir(parents=True, exist_ok=True)
+    cache_root = os.path.normcase(os.path.abspath(str(repo_cache)))
+    copied = 0
+    for name in names:
+        entry = snapshot / name
+        if not os.path.lexists(str(entry)):
+            continue
+        source = entry
+        if os.path.islink(str(entry)):
+            target = os.readlink(str(entry))
+            source = Path(os.path.normpath(os.path.join(str(entry.parent), target)))
+        source_path = os.path.normcase(os.path.abspath(str(source)))
+        if os.path.commonpath((cache_root, source_path)) != cache_root:
+            raise RuntimeError(f"Refusing model link outside the Hugging Face cache: {name}")
+        source_size = os.stat(source_path).st_size
+        if source_size <= 0:
+            continue
+        output = destination / name
+        try:
+            if output.is_file() and output.stat().st_size == source_size:
+                copied += 1
+                continue
+        except OSError:
+            pass
+        if os.path.lexists(str(output)):
+            output.unlink()
+        try:
+            os.link(source_path, str(output))
+        except OSError:
+            shutil.copy2(source_path, output)
+        copied += 1
+    return copied > 0 and whisper_model_files_complete(destination)
 
 
 def prepare_whisper_model(
@@ -328,6 +385,16 @@ def prepare_whisper_model(
     if not repo_id:
         raise ValueError(f"Unknown Whisper model: {model_name}")
     repo_cache = models_dir / ("models--" + repo_id.replace("/", "--"))
+    trusted_model_dir = models_dir / "trusted" / re.sub(r"[^0-9A-Za-z._-]+", "-", model_name)
+    if whisper_model_files_complete(trusted_model_dir):
+        if progress_callback:
+            progress_callback(
+                "model",
+                1,
+                1,
+                f"Using the cached Whisper {model_name} speech model.",
+            )
+        return trusted_model_dir
     snapshots_dir = repo_cache / "snapshots"
     if snapshots_dir.is_dir():
         snapshots = sorted(
@@ -336,7 +403,7 @@ def prepare_whisper_model(
             reverse=True,
         )
         for snapshot in snapshots:
-            if whisper_model_files_complete(snapshot):
+            if materialize_whisper_snapshot(snapshot, trusted_model_dir, repo_cache):
                 if progress_callback:
                     progress_callback(
                         "model",
@@ -344,7 +411,7 @@ def prepare_whisper_model(
                         1,
                         f"Using the cached Whisper {model_name} speech model.",
                     )
-                return snapshot
+                return trusted_model_dir
 
     repairing = repo_cache.exists()
     action = "Repairing an incomplete" if repairing else "Downloading"
@@ -399,7 +466,7 @@ def prepare_whisper_model(
                 force_download=force_download,
                 tqdm_class=ModelDownloadProgress,
             ))
-            if whisper_model_files_complete(snapshot_path):
+            if materialize_whisper_snapshot(snapshot_path, trusted_model_dir, repo_cache):
                 if progress_callback:
                     progress_callback(
                         "model_download",
@@ -407,7 +474,7 @@ def prepare_whisper_model(
                         1,
                         f"Whisper {model_name} model is ready.",
                     )
-                return snapshot_path
+                return trusted_model_dir
             last_error = RuntimeError("required model files are still missing")
         except Exception as exc:
             last_error = exc

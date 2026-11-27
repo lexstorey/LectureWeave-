@@ -39,13 +39,14 @@ from lecture_to_docx import (
     detect_slides,
     omit_incidental_slide_appearances,
     parse_chat_comments,
+    prepare_whisper_model,
     transcribe,
     write_transcript_files,
 )
 
 
 APP_NAME = "LectureWeave+"
-APP_VERSION = "0.2.3"
+APP_VERSION = "0.2.4"
 REPOSITORY_URL = "https://github.com/lexstorey/LectureWeave-"
 LATEST_RELEASE_API = "https://api.github.com/repos/lexstorey/LectureWeave-/releases/latest"
 PURPLE = "#4A148C"
@@ -876,9 +877,26 @@ def run_self_test() -> int:
     return 0
 
 
+def run_model_cache_test() -> int:
+    try:
+        from faster_whisper import WhisperModel
+
+        app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        model_path = prepare_whisper_model(
+            "turbo",
+            app_data / "LectureTranscriptSlides" / "models",
+        )
+        WhisperModel(str(model_path), device="cpu", compute_type="int8")
+        return 0
+    except Exception:
+        return 10
+
+
 def main() -> None:
     if "--self-test" in sys.argv:
         raise SystemExit(run_self_test())
+    if "--model-cache-test" in sys.argv:
+        raise SystemExit(run_model_cache_test())
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)

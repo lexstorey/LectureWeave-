@@ -2,7 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from lecture_to_docx import whisper_model_files_complete
+from lecture_to_docx import materialize_whisper_snapshot, whisper_model_files_complete
 
 
 class ModelCacheTests(unittest.TestCase):
@@ -27,6 +27,21 @@ class ModelCacheTests(unittest.TestCase):
             (model_dir / "model.bin").write_bytes(b"")
             (model_dir / "tokenizer.json").write_bytes(b"complete")
             self.assertFalse(whisper_model_files_complete(model_dir))
+
+    def test_materializes_a_snapshot_without_reparse_points(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            repo_cache = root / "models--owner--model"
+            snapshot = repo_cache / "snapshots" / "revision"
+            destination = root / "trusted" / "turbo"
+            snapshot.mkdir(parents=True)
+            for name in ("config.json", "model.bin", "tokenizer.json"):
+                (snapshot / name).write_bytes((name + " data").encode())
+
+            self.assertTrue(materialize_whisper_snapshot(snapshot, destination, repo_cache))
+            self.assertTrue(whisper_model_files_complete(destination))
+            self.assertFalse((destination / "model.bin").is_symlink())
+            self.assertEqual(b"model.bin data", (destination / "model.bin").read_bytes())
 
 
 if __name__ == "__main__":
