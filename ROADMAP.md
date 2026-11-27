@@ -7,8 +7,10 @@
   registry keys and machine-readable identifiers while retaining it in the
   visible product name).
 - Tagline: **Slides, speech and chat—kept in sync.**
-- Primary output remains a readable Word document.
-- Add a structured, Claude-ready Markdown/JSON export alongside Word.
+- The primary output becomes a Claude-ready Markdown pack; the Word document
+  remains an optional reading copy. See [CLAUDE_PACK_PLAN.md](CLAUDE_PACK_PLAN.md).
+- LectureWeave+ handles perception and alignment (audio, slides, chat, speakers);
+  the receiving Claude handles interpretation. Local LLM summarisation is parked.
 - Processing remains local by default.
 
 ## Brand and application assets
@@ -99,14 +101,17 @@ Planned branding work:
 
 ## Phase 4 — exports for the real workflow
 
-- Keep the current Word handout.
-- Add Markdown with one section per slide, embedded image references,
-  timestamped transcript and chat messages.
+- Add the Claude pack: XML-tagged Markdown with a mechanical lecture header,
+  one element per slide span or off-slide segment, full slide text, verbatim
+  transcript paragraphs, filtered chat and pseudonymised students. The format is
+  specified in [CLAUDE_PACK_PLAN.md](CLAUDE_PACK_PLAN.md).
+- Add a visuals PDF only when no deck was supplied or off-deck frames were shown
+  (Claude reads PDF pages visually but not images inside .docx files).
+- Generate `CLAUDE_INSTRUCTIONS.md` for the receiving Claude Project.
+- Keep the Word handout as an optional reading copy, with deck slide numbers in
+  headings.
 - Add a self-contained JSON project artifact for future regeneration.
 - Add SRT and VTT exports.
-- Add a "Claude packet" ZIP containing Markdown, slide images and the project
-  manifest.
-- Optionally create an editable HTML viewer with search and timestamp links.
 
 ## Phase 5 — desktop-product improvements
 
@@ -125,8 +130,8 @@ Planned branding work:
 - WhisperX forced alignment for more precise timestamps.
 - Optional anonymous speaker diarization for lecturer/student Q&A.
 - Search across a course's transcripts and slide OCR.
-- Local or user-configured LLM generation of summaries and study notes, always
-  linked back to slide numbers and timestamps.
+- Local LLM summarisation is parked: the receiving Claude produces better notes
+  from the verbatim pack. Revisit only for Claude-free or no-upload use.
 
 ## GitHub reuse shortlist
 
@@ -167,15 +172,19 @@ The exact file/function audit and pinned commits for the first two ports are in
 
 ## Recommended implementation order
 
-1. Branding, icon integration and cache-compatible rename.
-2. Word-level timestamps, confidence retention and editable course glossary.
-3. RapidOCR slide text extraction and OCR-derived hotwords.
-4. Adaptive slide detection, moving-region mask and global deduplication.
-5. Smart selective retranscription and Fast/Best/Smart modes.
-6. Review workspace and project manifest.
-7. Claude-ready Markdown/ZIP export.
-8. Installer, updater, queue and cache management.
-9. Optional WhisperX alignment/diarization.
+Items 1–4 of the original order (branding, word timestamps, RapidOCR hotwords,
+adaptive detection) and the installer/updater and optional WhisperX stages are
+in place. The order from here follows [CLAUDE_PACK_PLAN.md](CLAUDE_PACK_PLAN.md):
+
+1. Vocabulary pipeline fix: filter template text and common words, rank terms,
+   per-unit glossary, generic default prompt.
+2. Chat clock offset calibration.
+3. Word-timestamp slide boundary splitting.
+4. Repetition guard and suspicious-segment flags.
+5. Claude pack exporter, paragraph merging, pseudonymisation and header.
+6. Multi-deck matching, deck re-matching and long-dwell off-slide detection.
+7. Visuals PDF and speaker naming.
+8. Smart selective retranscription and the full review workspace.
 
 Each stage should be measured against the existing Legislation lecture fixture
 before it replaces the current behaviour. Preserve the current result as the
