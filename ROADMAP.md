@@ -134,6 +134,9 @@ Only reuse code with an explicit compatible license. Record the exact upstream
 commit, retain attribution and include the applicable license in
 `THIRD_PARTY_NOTICES.txt`.
 
+The exact file/function audit and pinned commits for the first two ports are in
+[`UPSTREAM_ADOPTION.md`](UPSTREAM_ADOPTION.md).
+
 | Repository | License | What LectureWeave+ should reuse | Decision |
 |---|---|---|---|
 | [aggarwal-shiv/LectureLens](https://github.com/aggarwal-shiv/LectureLens) | MIT | SSIM + pHash + HSV majority voting, temporal smoothing, transition rejection and queue ideas | **High priority.** Port the detector concepts into the existing Python pipeline and benchmark them against the current lecture fixture. |
