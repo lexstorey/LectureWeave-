@@ -44,7 +44,7 @@ from lecture_to_docx import (
 
 
 APP_NAME = "LectureWeave+"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 REPOSITORY_URL = "https://github.com/lexstorey/LectureWeave-"
 LATEST_RELEASE_API = "https://api.github.com/repos/lexstorey/LectureWeave-/releases/latest"
 PURPLE = "#4A148C"
@@ -64,6 +64,19 @@ SELF_TEST_COMMENTS = """- **AMANDA SCHWARTZ**
   **02:44**
 
   yes. thanks
+"""
+
+SELF_TEST_PLAIN_COMMENTS = """EMILY MILES
+
+**00:11**
+
+always convenient
+
+JOCK PALFREEMAN
+
+**01:05:23**
+
+It's almost a quasi privatisation of justice&#x20;
 """
 
 
@@ -693,6 +706,13 @@ def run_self_test() -> int:
         return 3
     if parsed[1]["text"] != "yes. thanks":
         return 4
+    plain = parse_chat_comments(SELF_TEST_PLAIN_COMMENTS)
+    if len(plain) != 2:
+        return 5
+    if plain[0]["author"] != "EMILY MILES" or plain[0]["start"] != 11:
+        return 6
+    if plain[1]["start"] != 3923 or plain[1]["text"] != "It's almost a quasi privatisation of justice":
+        return 7
     return 0
 
 

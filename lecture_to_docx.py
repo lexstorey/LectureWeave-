@@ -77,34 +77,49 @@ def clean_chat_markup(value: str) -> str:
 
 
 def parse_chat_comments(text: str) -> list[dict[str, Any]]:
-    """Parse Blackboard-style copied chat Markdown into timestamped comments."""
+    """Parse Blackboard copied chat in bulleted Markdown or plain-text blocks."""
     normalized = html.unescape(text).replace("\r\n", "\n").replace("\r", "\n")
-    blocks = re.split(r"(?m)^\s*-\s+", normalized)
+    lines = normalized.splitlines()
     comments: list[dict[str, Any]] = []
-    time_pattern = re.compile(r"^\*{0,2}(\d{1,3}:\d{2}(?::\d{2})?)\*{0,2}$")
-    for block in blocks[1:]:
-        lines = [line.strip() for line in block.splitlines() if line.strip()]
-        if len(lines) < 3:
+    time_pattern = re.compile(r"^\*{0,2}\s*(\d{1,3}:\d{2}(?::\d{2})?)\s*\*{0,2}$")
+
+    timestamps: list[tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        match = time_pattern.fullmatch(line.strip())
+        if match:
+            timestamps.append((index, match.group(1)))
+
+    def previous_content_line(before: int) -> int | None:
+        for line_index in range(before - 1, -1, -1):
+            if lines[line_index].strip():
+                return line_index
+        return None
+
+    for position, (timestamp_index, timestamp_text) in enumerate(timestamps):
+        author_index = previous_content_line(timestamp_index)
+        if author_index is None:
             continue
-        author = clean_chat_markup(lines[0])
-        timestamp_index = None
-        timestamp_text = None
-        for index, line in enumerate(lines[1:], 1):
-            match = time_pattern.fullmatch(line)
-            if match:
-                timestamp_index = index
-                timestamp_text = match.group(1)
-                break
-        if timestamp_index is None or timestamp_text is None:
-            continue
-        message = clean_chat_markup(" ".join(lines[timestamp_index + 1:]))
+        author = clean_chat_markup(lines[author_index])
+
+        if position + 1 < len(timestamps):
+            next_timestamp_index = timestamps[position + 1][0]
+            next_author_index = previous_content_line(next_timestamp_index)
+            message_end = next_author_index if next_author_index is not None else next_timestamp_index
+        else:
+            message_end = len(lines)
+
+        message = clean_chat_markup(" ".join(lines[timestamp_index + 1:message_end]))
         if not author or not message:
+            continue
+        try:
+            start = parse_chat_timestamp(timestamp_text)
+        except ValueError:
             continue
         comments.append(
             {
                 "author": author,
                 "timestamp": timestamp_text,
-                "start": parse_chat_timestamp(timestamp_text),
+                "start": start,
                 "text": message,
             }
         )

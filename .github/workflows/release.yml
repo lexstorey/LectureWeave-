@@ -9,7 +9,7 @@ on:
       version:
         description: "Version without the v prefix, for example 0.2.0"
         required: true
-        default: "0.2.0"
+        default: "0.2.1"
 
 permissions:
   contents: write
@@ -47,7 +47,9 @@ jobs:
           python -m pip install -r requirements.txt pyinstaller
 
       - name: Run source self-test
-        run: python lecture_transcript_gui_qt.py --self-test
+        run: |
+          python lecture_transcript_gui_qt.py --self-test
+          python -m unittest discover -s tests
 
       - name: Build portable application
         run: python -m PyInstaller --noconfirm --clean LectureWeavePlus.spec
