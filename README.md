@@ -6,23 +6,39 @@
 
 [Download the Windows installer](https://github.com/lexstorey/LectureWeave-/releases/latest/download/LectureWeavePlus-Setup.exe) · [Portable ZIP](https://github.com/lexstorey/LectureWeave-/releases/latest/download/LectureWeavePlus-Portable.zip) · [All releases](https://github.com/lexstorey/LectureWeave-/releases)
 
-LectureWeave+ is a local-first Windows desktop application that converts a
-lecture recording into a timestamped Word document containing detected slides,
-machine-generated transcript text and optional chat comments.
+LectureWeave+ is a local-first Windows desktop application that turns a lecture
+recording into a **Claude pack**: a structured Markdown file that ties every
+spoken sentence and chat comment to the slide on screen, ready to upload to
+Claude alongside your slide pack, readings and notes. It can also create a Word
+reading copy with slide images.
 
 ## Current capabilities
 
 - Drag-and-drop local lecture videos
-- Optional PDF or PowerPoint slide packs with real deck slide numbering
+- **Claude pack (.md):** full verbatim transcript grouped by slide, with each
+  slide's own text, a mechanical lecture header (decks, slide coverage, gaps,
+  chat clock, terms index, emphasis cues), filtered chat linked to spoken
+  answers, low-confidence words marked, and off-slide segments when a slide
+  stays up long after the lecturer has moved on
+- A visuals PDF of video frames that match no deck, so Claude can see them, and
+  a `CLAUDE_INSTRUCTIONS.md` file for your Claude Project
+- Students in the chat are pseudonymised (Student A, B, …) by default
+- Several PDF or PowerPoint slide decks per lecture, labelled A, B, …, with real
+  deck slide numbers, match confidence and deck-switch detection
+- Automatic chat clock calibration from spoken echoes of chat comments, with a
+  manual override
+- An optional unit glossary of names, Acts, cases and acronyms for Whisper
 - Local transcription with a maximum-accuracy Large-v3 mode and a faster Turbo mode
 - Adaptive multi-signal slide detection, moving-region masking and stable-frame confirmation
 - Global repeated-slide recognition without losing later timeline appearances
 - Local RapidOCR slide text extraction when no original deck is available
-- Slide-derived terminology supplied to Whisper for names and specialist vocabulary
+- Ranked slide-derived terminology for Whisper that ignores slide-template text
+  and common words
+- Speech split at slide changes using word timestamps, so sentences land under
+  the right slide
 - Timestamped Blackboard-style chat comment import
 - Review screen for correcting deck numbers, slide text and transcript before export
-- Word document generation that separates slide text from the lecturer's discussion
-- One final Word document per generation, without duplicate ZIP, Markdown or JSON outputs
+- Optional Word reading copy that separates slide text from the lecturer's discussion
 - Generation settings lock while a job is running, with cooperative cancellation and cleanup
 - Mouse-wheel-safe model selection to prevent accidental accuracy changes while scrolling
 - Optional external WhisperX word alignment and anonymous speaker labels
@@ -61,9 +77,8 @@ must be extracted fully before the EXE is opened.
 ## Project status
 
 LectureWeave+ is under active development. The current version is a working
-Windows prototype. Planned improvements include OCR-derived terminology,
-confidence-aware transcription repair, adaptive slide detection and a synchronized
-review workspace. See [ROADMAP.md](ROADMAP.md).
+Windows prototype. The Claude pack format and the remaining work are described
+in [CLAUDE_PACK_PLAN.md](CLAUDE_PACK_PLAN.md); see also [ROADMAP.md](ROADMAP.md).
 
 Maintainers can publish an updated installer by following
 [RELEASING.md](RELEASING.md).

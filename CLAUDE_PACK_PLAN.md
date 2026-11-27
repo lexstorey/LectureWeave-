@@ -140,8 +140,16 @@ All timestamps use `HH:MM:SS`.
 
 ## Work plan
 
-Each item ships on its own branch and is measured against a baseline lecture
-before it replaces current behaviour.
+Status as of version 0.4.0:
+
+- **Done:** items 1–10 and 13; the long-dwell half of item 12; the
+  chat-to-answer links of item 14.
+- **Still open:**
+  - item 11: adding a deck changes the Whisper vocabulary, so the lecture is
+    transcribed again;
+  - camera and name-tile frame detection (item 12);
+  - speaker naming (item 14);
+  - the "Later" items.
 
 ### Phase 1: accuracy fixes
 
