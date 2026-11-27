@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import hashlib
 import io
 import json
@@ -18,6 +19,7 @@ from PySide6.QtGui import QDesktopServices, QDragEnterEvent, QDropEvent, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -42,12 +44,13 @@ from lecture_to_docx import (
     parse_chat_comments,
     prepare_whisper_model,
     transcribe,
+    whisper_model_is_cached,
     write_transcript_files,
 )
 
 
 APP_NAME = "LectureWeave+"
-APP_VERSION = "0.2.5"
+APP_VERSION = "0.2.6"
 REPOSITORY_URL = "https://github.com/lexstorey/LectureWeave-"
 PURPLE = "#4A148C"
 PURPLE_DARK = "#32105D"
@@ -55,6 +58,25 @@ PURPLE_LIGHT = "#F2ECFA"
 BACKGROUND = "#F5F4F8"
 TEXT = "#26232B"
 BLACKBOARD_VIDEO_COMMAND = 'copy(document.querySelector("video")?.currentSrc)'
+GPU_SETUP_URL = "https://github.com/SYSTRAN/faster-whisper#gpu"
+
+
+def model_cache_root() -> Path:
+    app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    return app_data / "LectureTranscriptSlides" / "models"
+
+
+def missing_cuda_runtime_libraries() -> list[str]:
+    """Return required Faster Whisper CUDA libraries that Windows cannot load."""
+    if os.name != "nt":
+        return []
+    missing: list[str] = []
+    for name in ("cublas64_12.dll", "cudnn64_9.dll"):
+        try:
+            ctypes.WinDLL(name)
+        except OSError:
+            missing.append(name)
+    return missing
 
 SELF_TEST_COMMENTS = """- **AMANDA SCHWARTZ**
 
@@ -289,6 +311,7 @@ class ProcessingThread(QThread):
         comments: list[dict],
         reuse_transcript: bool,
         omit_brief_slides: bool,
+        model_name: str,
     ) -> None:
         super().__init__()
         self.video = video
@@ -297,6 +320,7 @@ class ProcessingThread(QThread):
         self.comments = comments
         self.reuse_transcript = reuse_transcript
         self.omit_brief_slides = omit_brief_slides
+        self.model_name = model_name
 
     def report_progress(self, stage: str, current: int, total: int, detail: str) -> None:
         self.status.emit(detail)
@@ -315,7 +339,8 @@ class ProcessingThread(QThread):
         ).hexdigest()[:20]
         work_dir = cache_root / "jobs" / fingerprint
         slides_dir = work_dir / "slides"
-        transcript_dir = work_dir / "transcript"
+        model_cache_key = re.sub(r"[^0-9A-Za-z._-]+", "-", self.model_name)
+        transcript_dir = work_dir / f"transcript-{model_cache_key}"
         model_cache = cache_root / "models"
         work_dir.mkdir(parents=True, exist_ok=True)
         self.output.parent.mkdir(parents=True, exist_ok=True)
@@ -323,6 +348,12 @@ class ProcessingThread(QThread):
         writer = SignalWriter(self.log)
         try:
             with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
+                self.status.emit(f"Preparing the Whisper {self.model_name} speech model…")
+                prepare_whisper_model(
+                    self.model_name,
+                    model_cache,
+                    self.report_progress,
+                )
                 self.status.emit("Detecting stable slide changes…")
                 slides, duration = detect_slides(
                     self.video,
@@ -345,7 +376,7 @@ class ProcessingThread(QThread):
                     segments, device = transcribe(
                         self.video,
                         work_dir,
-                        "turbo",
+                        self.model_name,
                         model_cache=model_cache,
                         progress_callback=self.report_progress,
                     )
@@ -433,8 +464,8 @@ class MainWindow(QMainWindow):
             QLabel#count {{ color: {PURPLE}; font-size: 9pt; font-weight: 600; }}
             QLabel#dropArea {{ background: {PURPLE_LIGHT}; color: {PURPLE}; border: 1px solid #BFA8D7; border-radius: 6px; font-weight: 600; }}
             QFrame#consoleHelp {{ background: #FAF7FD; border: 1px solid #D8C8E7; border-radius: 6px; }}
-            QLineEdit, QTextEdit {{ background: white; color: {TEXT}; border: 1px solid #CFC9D5; border-radius: 5px; padding: 7px; font-family: 'Segoe UI'; font-size: 10pt; }}
-            QLineEdit:focus, QTextEdit:focus {{ border: 2px solid {PURPLE}; }}
+            QLineEdit, QTextEdit, QComboBox {{ background: white; color: {TEXT}; border: 1px solid #CFC9D5; border-radius: 5px; padding: 7px; font-family: 'Segoe UI'; font-size: 10pt; }}
+            QLineEdit:focus, QTextEdit:focus, QComboBox:focus {{ border: 2px solid {PURPLE}; }}
             QPushButton {{ background: #ECE8F0; color: {TEXT}; border: 1px solid #D0C8D7; border-radius: 6px; padding: 8px 14px; font-family: 'Segoe UI'; font-size: 10pt; }}
             QPushButton:hover {{ background: #E2D8EC; }}
             QPushButton#primary {{ background: {PURPLE}; color: white; border: none; font-weight: 600; padding: 10px 20px; }}
@@ -593,6 +624,21 @@ class MainWindow(QMainWindow):
         output_row.addWidget(self.output_edit, 1)
         output_row.addWidget(choose_output)
         details_layout.addLayout(output_row)
+        quality_row = QHBoxLayout()
+        quality_label = self.hint_label("Accuracy")
+        quality_label.setFixedWidth(72)
+        self.model_combo = QComboBox()
+        self.model_combo.addItem("Maximum accuracy — Large-v3 (recommended)", "large-v3")
+        self.model_combo.addItem("Faster — Turbo", "turbo")
+        quality_row.addWidget(quality_label)
+        quality_row.addWidget(self.model_combo, 1)
+        details_layout.addLayout(quality_row)
+        details_layout.addWidget(
+            self.hint_label(
+                "Large-v3 gives the best transcript accuracy for long lectures. Its first use "
+                "requires an approximately 3 GB download; LectureWeave+ will ask before downloading it."
+            )
+        )
         self.reuse_check = QCheckBox(
             "Reuse a cached local transcript when this exact video has already been processed"
         )
@@ -720,6 +766,10 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
 
+        model_name = self.preflight_transcription_model()
+        if not model_name:
+            return
+
         self.log.clear()
         self.start_button.setEnabled(False)
         self.open_button.setEnabled(False)
@@ -734,6 +784,7 @@ class MainWindow(QMainWindow):
             comments,
             self.reuse_check.isChecked(),
             self.omit_check.isChecked(),
+            model_name,
         )
         self.worker.status.connect(self.status.setText)
         self.worker.progress.connect(self.processing_progress)
@@ -741,6 +792,99 @@ class MainWindow(QMainWindow):
         self.worker.completed.connect(self.processing_complete)
         self.worker.failed.connect(self.processing_failed)
         self.worker.start()
+
+    def preflight_transcription_model(self) -> str | None:
+        """Resolve model choice while explaining downloads and GPU requirements."""
+        model_name = str(self.model_combo.currentData())
+        models_dir = model_cache_root()
+
+        while True:
+            if not whisper_model_is_cached(model_name, models_dir):
+                prompt = QMessageBox(self)
+                prompt.setWindowTitle(APP_NAME)
+                prompt.setIcon(QMessageBox.Icon.Question)
+                display_name = "Large-v3" if model_name == "large-v3" else "Turbo"
+                prompt.setText(f"The Whisper {display_name} model is not downloaded yet.")
+                if model_name == "large-v3":
+                    prompt.setInformativeText(
+                        "Large-v3 provides the maximum transcript accuracy and is an approximately "
+                        "3 GB one-time download. Download progress will be shown in LectureWeave+, "
+                        "and the model will be reused for future lectures."
+                    )
+                    download = prompt.addButton(
+                        "Download Large-v3 and continue",
+                        QMessageBox.ButtonRole.AcceptRole,
+                    )
+                    use_turbo = prompt.addButton(
+                        "Use Turbo this time",
+                        QMessageBox.ButtonRole.ActionRole,
+                    )
+                else:
+                    prompt.setInformativeText(
+                        "Turbo is a one-time download. Download progress will be shown in "
+                        "LectureWeave+, and the model will be reused for future lectures."
+                    )
+                    download = prompt.addButton(
+                        "Download Turbo and continue",
+                        QMessageBox.ButtonRole.AcceptRole,
+                    )
+                    use_turbo = None
+                cancel = prompt.addButton(QMessageBox.StandardButton.Cancel)
+                prompt.setDefaultButton(download)
+                prompt.exec()
+                clicked = prompt.clickedButton()
+                if clicked is cancel:
+                    return None
+                if use_turbo is not None and clicked is use_turbo:
+                    model_name = "turbo"
+                    continue
+                if clicked is not download:
+                    return None
+
+            if model_name != "large-v3":
+                return model_name
+
+            missing = missing_cuda_runtime_libraries()
+            if not missing:
+                return model_name
+
+            prompt = QMessageBox(self)
+            prompt.setWindowTitle(APP_NAME)
+            prompt.setIcon(QMessageBox.Icon.Warning)
+            prompt.setText("Maximum-accuracy transcription cannot currently use your NVIDIA GPU.")
+            prompt.setInformativeText(
+                "Windows could not load " + ", ".join(missing) + ". Large-v3 can continue on "
+                "the CPU, but a 1–2 hour lecture will take much longer. You can open the official "
+                "Faster Whisper GPU setup guide, use Turbo, or continue on CPU."
+            )
+            setup = prompt.addButton(
+                "Open GPU setup guide",
+                QMessageBox.ButtonRole.HelpRole,
+            )
+            cpu = prompt.addButton(
+                "Continue with Large-v3 on CPU",
+                QMessageBox.ButtonRole.AcceptRole,
+            )
+            turbo = prompt.addButton(
+                "Use Turbo this time",
+                QMessageBox.ButtonRole.ActionRole,
+            )
+            cancel = prompt.addButton(QMessageBox.StandardButton.Cancel)
+            prompt.setDefaultButton(setup)
+            prompt.exec()
+            clicked = prompt.clickedButton()
+            if clicked is setup:
+                QDesktopServices.openUrl(QUrl(GPU_SETUP_URL))
+                self.status.setText("GPU setup guide opened. Try again after installing the required NVIDIA runtime.")
+                return None
+            if clicked is cpu:
+                return model_name
+            if clicked is turbo:
+                model_name = "turbo"
+                continue
+            if clicked is cancel:
+                return None
+            return None
 
     def processing_progress(self, current: int, total: int) -> None:
         if total > 0:

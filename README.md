@@ -13,7 +13,7 @@ machine-generated transcript text and optional chat comments.
 ## Current capabilities
 
 - Drag-and-drop local lecture videos
-- Local transcription with Faster Whisper
+- Local transcription with a maximum-accuracy Large-v3 mode and a faster Turbo mode
 - Stable slide detection and brief-transition filtering
 - Timestamped Blackboard-style chat comment import
 - Word document generation with slide images and aligned transcript text
@@ -21,6 +21,8 @@ machine-generated transcript text and optional chat comments.
 - CPU fallback and NVIDIA CUDA acceleration when available
 - Live slide-scan, model-download, transcription and export progress with ETA
 - Automatic resume and repair of incomplete Whisper model downloads
+- Guided one-time model downloads with clear Download, Turbo and Cancel choices
+- Model-specific transcript caching, so a Turbo transcript is never reused as Large-v3 output
 - One-click, checksum-verified updates from official GitHub releases
 
 ## Installing and updating

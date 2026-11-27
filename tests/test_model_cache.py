@@ -2,7 +2,11 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from lecture_to_docx import materialize_whisper_snapshot, whisper_model_files_complete
+from lecture_to_docx import (
+    materialize_whisper_snapshot,
+    whisper_model_files_complete,
+    whisper_model_is_cached,
+)
 
 
 class ModelCacheTests(unittest.TestCase):
@@ -42,6 +46,18 @@ class ModelCacheTests(unittest.TestCase):
             self.assertTrue(whisper_model_files_complete(destination))
             self.assertFalse((destination / "model.bin").is_symlink())
             self.assertEqual(b"model.bin data", (destination / "model.bin").read_bytes())
+
+    def test_finds_a_complete_trusted_model_without_downloading(self):
+        with tempfile.TemporaryDirectory() as folder:
+            model_dir = Path(folder) / "trusted" / "large-v3"
+            model_dir.mkdir(parents=True)
+            for name in ("config.json", "model.bin", "tokenizer.json"):
+                (model_dir / name).write_bytes(b"complete")
+            self.assertTrue(whisper_model_is_cached("large-v3", Path(folder)))
+
+    def test_reports_an_uncached_model_without_downloading(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertFalse(whisper_model_is_cached("large-v3", Path(folder)))
 
 
 if __name__ == "__main__":

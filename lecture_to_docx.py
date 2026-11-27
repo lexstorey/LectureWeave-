@@ -321,6 +321,32 @@ def whisper_model_files_complete(model_dir: Path) -> bool:
         return False
 
 
+def whisper_model_is_cached(model_name: str, models_dir: Path) -> bool:
+    """Return whether a complete model is already present without downloading it."""
+    from faster_whisper.utils import _MODELS
+
+    repo_id = model_name if "/" in model_name else _MODELS.get(model_name)
+    if not repo_id:
+        return False
+    trusted_model_dir = (
+        models_dir
+        / "trusted"
+        / re.sub(r"[^0-9A-Za-z._-]+", "-", model_name)
+    )
+    if whisper_model_files_complete(trusted_model_dir):
+        return True
+
+    repo_cache = models_dir / ("models--" + repo_id.replace("/", "--"))
+    snapshots_dir = repo_cache / "snapshots"
+    if not snapshots_dir.is_dir():
+        return False
+    try:
+        snapshots = (path for path in snapshots_dir.iterdir() if path.is_dir())
+        return any(whisper_model_files_complete(snapshot) for snapshot in snapshots)
+    except OSError:
+        return False
+
+
 def materialize_whisper_snapshot(snapshot: Path, destination: Path, repo_cache: Path) -> bool:
     """Create a link-free model directory from a Hugging Face snapshot.
 
