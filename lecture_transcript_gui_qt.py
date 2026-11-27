@@ -78,7 +78,7 @@ from lecture_to_docx import (
 
 
 APP_NAME = "LectureWeave+"
-APP_VERSION = "0.3.4"
+APP_VERSION = "0.3.5"
 REPOSITORY_URL = "https://github.com/lexstorey/LectureWeave-"
 PURPLE = "#4A148C"
 PURPLE_DARK = "#32105D"
@@ -496,17 +496,29 @@ class ProcessingThread(QThread):
                         segments = json.loads(aligned_cache.read_text(encoding="utf-8"))
                         print("Loaded cached WhisperX word alignment")
                     else:
-                        segments = enhance_with_whisperx(
-                            self.video,
-                            segments,
-                            transcript_dir,
-                            self.whisperx_python,
-                            self.report_progress,
-                            self.hf_token,
-                        )
-                        aligned_cache.write_text(
-                            json.dumps(segments, indent=2, ensure_ascii=False), encoding="utf-8"
-                        )
+                        try:
+                            segments = enhance_with_whisperx(
+                                self.video,
+                                segments,
+                                transcript_dir,
+                                self.whisperx_python,
+                                self.report_progress,
+                                self.hf_token,
+                            )
+                            aligned_cache.write_text(
+                                json.dumps(segments, indent=2, ensure_ascii=False),
+                                encoding="utf-8",
+                            )
+                        except Exception as exc:
+                            print(
+                                "Optional WhisperX step was skipped; continuing with the completed "
+                                f"Whisper transcript: {exc}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                            self.status.emit(
+                                "WhisperX could not finish; continuing without speaker labels…"
+                            )
 
                 self.report_progress(
                     "alignment",

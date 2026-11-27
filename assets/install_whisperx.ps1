@@ -25,7 +25,7 @@ if (-not (Test-Path -LiteralPath $envPython)) {
 
 Write-Host "Installing or repairing WhisperX..." -ForegroundColor Cyan
 & $envPython -m pip install --upgrade pip
-& $envPython -m pip install --upgrade whisperx
+& $envPython -m pip install --upgrade whisperx imageio-ffmpeg
 
 Write-Host "Installing the CUDA 12.8 PyTorch build..." -ForegroundColor Cyan
 & $envPython -m pip install --upgrade --force-reinstall torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128

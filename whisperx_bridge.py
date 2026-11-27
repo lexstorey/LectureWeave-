@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 from typing import Any, Callable
 
@@ -29,15 +30,24 @@ def inspect_whisperx_environment(python_executable: Path) -> dict[str, Any]:
     if not python_executable.is_file():
         return {"ready": False, "reason": "Python environment not found"}
     probe = r'''
-import json
+import json, os, shutil
 try:
     import torch, whisperx
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        try:
+            import imageio_ffmpeg
+            ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            ffmpeg = ""
     result = {
-        "ready": True,
+        "ready": bool(ffmpeg),
         "torch": torch.__version__,
         "cuda_build": torch.version.cuda,
         "cuda_available": bool(torch.cuda.is_available()),
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "",
+        "ffmpeg": ffmpeg,
+        "reason": "" if ffmpeg else "FFmpeg is missing; choose Install / repair",
     }
 except Exception as exc:
     result = {"ready": False, "reason": f"{type(exc).__name__}: {exc}"}
@@ -64,6 +74,10 @@ import json, os, sys
 from pathlib import Path
 import torch
 import whisperx
+try:
+    from whisperx.diarize import DiarizationPipeline
+except ImportError:
+    DiarizationPipeline = whisperx.DiarizationPipeline
 
 request_path, output_path = map(Path, sys.argv[1:3])
 request = json.loads(request_path.read_text(encoding="utf-8"))
@@ -76,7 +90,7 @@ aligned = whisperx.align(
 )
 token = os.environ.get("HF_TOKEN", "").strip()
 if token:
-    diarizer = whisperx.DiarizationPipeline(token=token, device=device)
+    diarizer = DiarizationPipeline(token=token, device=device)
     turns = diarizer(audio)
     aligned = whisperx.assign_word_speakers(turns, aligned)
 output_path.write_text(
@@ -87,6 +101,51 @@ output_path.write_text(
 
 def whisperx_environment_ready(python_executable: Path) -> bool:
     return bool(inspect_whisperx_environment(python_executable).get("ready"))
+
+
+def whisperx_ffmpeg_path(python_executable: Path) -> Path | None:
+    """Locate imageio-ffmpeg inside the external environment without importing it here."""
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return Path(system_ffmpeg)
+    try:
+        result = subprocess.run(
+            [
+                str(python_executable),
+                "-c",
+                "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        candidate = Path(result.stdout.strip())
+        return candidate if result.returncode == 0 and candidate.is_file() else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def prepare_whisperx_environment(
+    python_executable: Path, work_dir: Path, environment: dict[str, str]
+) -> None:
+    """Expose a private FFmpeg binary under the command name WhisperX expects."""
+    ffmpeg = whisperx_ffmpeg_path(python_executable)
+    if not ffmpeg:
+        raise RuntimeError(
+            "WhisperX requires FFmpeg. Use Install / repair in LectureWeave+ and retry."
+        )
+    alias_dir = work_dir / "whisperx-bin"
+    alias_dir.mkdir(parents=True, exist_ok=True)
+    alias = alias_dir / "ffmpeg.exe"
+    if not alias.is_file() or alias.stat().st_size != ffmpeg.stat().st_size:
+        if alias.exists():
+            alias.unlink()
+        try:
+            os.link(ffmpeg, alias)
+        except OSError:
+            shutil.copy2(ffmpeg, alias)
+    environment["PATH"] = str(alias_dir) + os.pathsep + environment.get("PATH", "")
 
 
 def enhance_with_whisperx(
@@ -118,6 +177,7 @@ def enhance_with_whisperx(
             detail += " and detecting anonymous speakers"
         progress_callback("whisperx", 0, 0, detail + "…")
     child_environment = os.environ.copy()
+    prepare_whisperx_environment(python_executable, work_dir, child_environment)
     if hf_token:
         child_environment["HF_TOKEN"] = hf_token
     else:

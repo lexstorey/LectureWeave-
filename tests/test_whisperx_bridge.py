@@ -9,6 +9,7 @@ from whisperx_bridge import (
     default_whisperx_python,
     enhance_with_whisperx,
     inspect_whisperx_environment,
+    prepare_whisperx_environment,
     whisperx_environment_ready,
 )
 
@@ -42,7 +43,9 @@ class WhisperXBridgeTests(unittest.TestCase):
             work_dir = Path(folder)
             output = work_dir / "whisperx_aligned.json"
             output.write_text(json.dumps([]), encoding="utf-8")
-            with patch("whisperx_bridge.subprocess.run") as run:
+            with patch("whisperx_bridge.prepare_whisperx_environment"), patch(
+                "whisperx_bridge.subprocess.run"
+            ) as run:
                 run.return_value.returncode = 0
                 enhance_with_whisperx(
                     work_dir / "lecture.mp4",
@@ -63,7 +66,9 @@ class WhisperXBridgeTests(unittest.TestCase):
         ):
             work_dir = Path(folder)
             (work_dir / "whisperx_aligned.json").write_text("[]", encoding="utf-8")
-            with patch("whisperx_bridge.subprocess.run") as run:
+            with patch("whisperx_bridge.prepare_whisperx_environment"), patch(
+                "whisperx_bridge.subprocess.run"
+            ) as run:
                 run.return_value.returncode = 0
                 enhance_with_whisperx(
                     work_dir / "lecture.mp4",
@@ -72,6 +77,20 @@ class WhisperXBridgeTests(unittest.TestCase):
                     work_dir / "python.exe",
                 )
             self.assertNotIn("HF_TOKEN", run.call_args.kwargs["env"])
+
+    def test_private_ffmpeg_is_exposed_under_expected_command_name(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "ffmpeg-versioned.exe"
+            source.write_bytes(b"private ffmpeg")
+            environment = {"PATH": "existing-path"}
+            with patch("whisperx_bridge.whisperx_ffmpeg_path", return_value=source):
+                prepare_whisperx_environment(
+                    root / "python.exe", root / "work", environment
+                )
+            alias = root / "work" / "whisperx-bin" / "ffmpeg.exe"
+            self.assertEqual(alias.read_bytes(), b"private ffmpeg")
+            self.assertTrue(environment["PATH"].startswith(str(alias.parent)))
 
 
 if __name__ == "__main__":

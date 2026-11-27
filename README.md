@@ -31,6 +31,9 @@ machine-generated transcript text and optional chat comments.
   CUDA/GPU readiness feedback, token access testing, and guided install/repair
 - Automatic reuse of CUDA and cuDNN libraries from the private WhisperX
   environment, allowing built-in Faster Whisper and WhisperX to share the GPU
+- Private FFmpeg installation for WhisperX audio loading, compatibility with
+  current and legacy diarization APIs, and graceful continuation when the
+  optional WhisperX stage cannot complete
 - Cached transcripts for faster regeneration
 - CPU fallback and NVIDIA CUDA acceleration when available
 - Live slide-scan, model-download, transcription and export progress with ETA
