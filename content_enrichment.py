@@ -30,6 +30,7 @@ class DeckPage:
 
 
 def normalise_slide_text(text: str) -> str:
+    text = re.sub(r"[\x00-\x01\x03-\x08\x0b\x0e-\x1f\x7f]", "", str(text)).replace("\x02", "-")
     lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
     return "\n".join(line for line in lines if line)
 

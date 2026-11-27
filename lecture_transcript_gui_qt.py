@@ -82,7 +82,7 @@ from lecture_to_docx import (
 
 
 APP_NAME = "LectureWeave+"
-APP_VERSION = "0.4.1"
+APP_VERSION = "0.4.2"
 REPOSITORY_URL = "https://github.com/lexstorey/LectureWeave-"
 PURPLE = "#4A148C"
 PURPLE_DARK = "#32105D"

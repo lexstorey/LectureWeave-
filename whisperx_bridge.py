@@ -10,6 +10,7 @@ pyannote model and ``HF_TOKEN`` is set.
 from __future__ import annotations
 
 import json
+import sys
 import os
 from pathlib import Path
 import shutil
@@ -90,9 +91,14 @@ aligned = whisperx.align(
 )
 token = os.environ.get("HF_TOKEN", "").strip()
 if token:
-    diarizer = DiarizationPipeline(token=token, device=device)
-    turns = diarizer(audio)
-    aligned = whisperx.assign_word_speakers(turns, aligned)
+    # Speaker labels are optional: a failure here must not discard the word
+    # alignment that has already finished.
+    try:
+        diarizer = DiarizationPipeline(token=token, device=device)
+        turns = diarizer(audio)
+        aligned = whisperx.assign_word_speakers(turns, aligned)
+    except Exception as exc:
+        print(f"LECTUREWEAVE_SPEAKERS_SKIPPED: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
 output_path.write_text(
     json.dumps(aligned.get("segments", []), ensure_ascii=False), encoding="utf-8"
 )
@@ -178,6 +184,11 @@ def enhance_with_whisperx(
         progress_callback("whisperx", 0, 0, detail + "…")
     child_environment = os.environ.copy()
     prepare_whisperx_environment(python_executable, work_dir, child_environment)
+    # Keep WhisperX/pyannote downloads in a private cache: a damaged shared
+    # Hugging Face cache (for example a broken Windows link) made the speaker
+    # model fail to open with "Invalid argument".
+    child_environment["HF_HOME"] = str(default_whisperx_python().parent.parent.parent / "hf-cache")
+    child_environment.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
     if hf_token:
         child_environment["HF_TOKEN"] = hf_token
     else:
@@ -194,7 +205,21 @@ def enhance_with_whisperx(
         detail = (result.stderr or result.stdout or "Unknown WhisperX error").strip()
         raise RuntimeError(f"Optional WhisperX alignment failed: {detail[-1200:]}")
     aligned = json.loads(output.read_text(encoding="utf-8"))
+    skipped = [
+        line.split(":", 1)[1].strip()
+        for line in (result.stderr or "").splitlines()
+        if line.startswith("LECTUREWEAVE_SPEAKERS_SKIPPED:")
+    ]
+    if skipped:
+        print(
+            "Speaker labels were skipped; word alignment was kept: " + skipped[-1][-400:],
+            file=sys.stderr,
+            flush=True,
+        )
     if progress_callback:
-        progress_callback("whisperx", 1, 1, "WhisperX word alignment complete.")
+        progress_callback(
+            "whisperx", 1, 1,
+            "WhisperX word alignment complete" + (" (speaker labels skipped)." if skipped else "."),
+        )
     return aligned
 

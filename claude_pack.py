@@ -578,7 +578,9 @@ def build_claude_pack(
         "",
     ]
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("\n".join(header + body).rstrip() + "\n", encoding="utf-8")
+    content = "\n".join(header + body).rstrip() + "\n"
+    content = re.sub(r"[\x00-\x01\x03-\x08\x0b\x0c\x0e-\x1f\x7f]", "", content.replace("\x02", "-"))
+    output_path.write_text(content, encoding="utf-8")
     text = output_path.read_text(encoding="utf-8")
     return {
         "path": output_path,

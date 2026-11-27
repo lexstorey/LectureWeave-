@@ -51,6 +51,30 @@ DEFAULT_PROMPT = (
 TRANSCRIPTION_SETTINGS_VERSION = "2"
 
 ProgressCallback = Callable[[str, int, int, str], None]
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffe\uffff]")
+
+
+def xml_safe_text(value: str) -> str:
+    """Remove characters Word documents cannot store.
+
+    PDF text layers use U+0002 for a hyphen inserted at a line break and can
+    contain other control characters; python-docx rejects all of them.
+    """
+    return _CONTROL_CHARACTERS.sub("", str(value).replace("\x02", "-"))
+
+
+def _clean_strings(value: Any) -> Any:
+    if isinstance(value, str):
+        return xml_safe_text(value)
+    if isinstance(value, list):
+        return [_clean_strings(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_clean_strings(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _clean_strings(item) for key, item in value.items()}
+    return value
+
+
 def format_time(seconds: float, include_ms: bool = False) -> str:
     seconds = max(0.0, float(seconds))
     whole = int(seconds)
@@ -84,7 +108,7 @@ def parse_chat_timestamp(value: str) -> float:
 
 
 def clean_chat_markup(value: str) -> str:
-    value = html.unescape(value).replace("\u00a0", " ").strip()
+    value = xml_safe_text(html.unescape(value).replace("\u00a0", " ")).strip()
     value = re.sub(r"^[-*]\s+", "", value)
     value = re.sub(r"^\*\*(.*?)\*\*$", r"\1", value)
     return re.sub(r"\s+", " ", value).strip()
@@ -1072,6 +1096,8 @@ def build_docx(
     omitted_slide_count: int = 0,
     progress_callback: ProgressCallback | None = None,
 ) -> None:
+    slides = _clean_strings(slides)
+    title_text = xml_safe_text(title_text)
     multiple_decks = len({
         slide.get("deck_label", "A") for slide in slides if slide.get("deck_slide_number")
     }) > 1
