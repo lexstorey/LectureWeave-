@@ -19,7 +19,7 @@ machine-generated transcript text and optional chat comments.
 - Word document generation with slide images and aligned transcript text
 - Cached transcripts for faster regeneration
 - CPU fallback and NVIDIA CUDA acceleration when available
-- In-app update checking against official GitHub releases
+- One-click, checksum-verified updates from official GitHub releases
 
 ## Installing and updating
 
@@ -29,7 +29,9 @@ existing copy updates the application while leaving locally cached models and
 transcripts in place.
 
 Inside LectureWeave+, select **Check for updates** to compare the installed
-version with the latest GitHub release and open the official installer download.
+version with the latest GitHub release. When an update is available, the app
+downloads the official installer, verifies its published SHA-256 digest, closes,
+installs the update and reopens automatically.
 The portable ZIP is available for users who do not want an installer, but it
 must be extracted fully before the EXE is opened.
 

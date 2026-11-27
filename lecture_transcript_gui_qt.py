@@ -8,10 +8,11 @@ import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 
-from PySide6.QtCore import QThread, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import QProcess, QThread, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices, QDragEnterEvent, QDropEvent, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -44,7 +45,7 @@ from lecture_to_docx import (
 
 
 APP_NAME = "LectureWeave+"
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.2.2"
 REPOSITORY_URL = "https://github.com/lexstorey/LectureWeave-"
 LATEST_RELEASE_API = "https://api.github.com/repos/lexstorey/LectureWeave-/releases/latest"
 PURPLE = "#4A148C"
@@ -89,6 +90,14 @@ def resource_path(relative: str) -> Path:
 def version_key(value: str) -> tuple[int, int, int]:
     numbers = [int(number) for number in re.findall(r"\d+", value)[:3]]
     return tuple((numbers + [0, 0, 0])[:3])
+
+
+def release_asset_sha256(value: str) -> str:
+    """Return the hexadecimal SHA-256 value published by GitHub Releases."""
+    match = re.fullmatch(r"sha256:([0-9a-fA-F]{64})", value.strip())
+    if not match:
+        raise ValueError("The release does not include a valid SHA-256 digest.")
+    return match.group(1).lower()
 
 
 class DropLineEdit(QLineEdit):
@@ -173,6 +182,56 @@ class UpdateCheckThread(QThread):
                 self.failed.emit(f"GitHub returned HTTP {exc.code} while checking for updates.")
         except Exception as exc:
             self.failed.emit(f"Could not check for updates: {exc}")
+
+
+class UpdateDownloadThread(QThread):
+    progress = Signal(int, int)
+    completed = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, url: str, expected_digest: str, tag: str) -> None:
+        super().__init__()
+        self.url = url
+        self.expected_digest = expected_digest
+        safe_tag = re.sub(r"[^0-9A-Za-z._-]+", "-", tag).strip("-") or "latest"
+        self.destination = Path(tempfile.gettempdir()) / f"LectureWeavePlus-{safe_tag}-Setup.exe"
+
+    def run(self) -> None:
+        partial = self.destination.with_suffix(self.destination.suffix + ".part")
+        try:
+            expected_sha256 = release_asset_sha256(self.expected_digest)
+            request = urllib.request.Request(
+                self.url,
+                headers={"User-Agent": f"LectureWeavePlus/{APP_VERSION}"},
+            )
+            hasher = hashlib.sha256()
+            received = 0
+            if partial.exists():
+                partial.unlink()
+            with urllib.request.urlopen(request, timeout=30) as response, partial.open("wb") as output:
+                total = int(response.headers.get("Content-Length") or 0)
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+                    hasher.update(chunk)
+                    received += len(chunk)
+                    self.progress.emit(received, total)
+            actual_sha256 = hasher.hexdigest()
+            if actual_sha256 != expected_sha256:
+                raise RuntimeError(
+                    "The downloaded installer failed its SHA-256 safety check. "
+                    "No update was installed."
+                )
+            if self.destination.exists():
+                self.destination.unlink()
+            partial.replace(self.destination)
+            self.completed.emit(str(self.destination))
+        except Exception as exc:
+            if partial.exists():
+                partial.unlink()
+            self.failed.emit(f"Could not download the update: {exc}")
 
 
 class ProcessingThread(QThread):
@@ -297,6 +356,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(820, 680)
         self.worker: ProcessingThread | None = None
         self.update_worker: UpdateCheckThread | None = None
+        self.update_download_worker: UpdateDownloadThread | None = None
         self.last_output: Path | None = None
 
         self.setStyleSheet(
@@ -644,7 +704,16 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.last_output)))
 
     def check_for_updates(self) -> None:
-        if self.update_worker and self.update_worker.isRunning():
+        if self.worker and self.worker.isRunning():
+            QMessageBox.information(
+                self,
+                APP_NAME,
+                "Finish creating the current document before installing an update.",
+            )
+            return
+        if (self.update_worker and self.update_worker.isRunning()) or (
+            self.update_download_worker and self.update_download_worker.isRunning()
+        ):
             return
         self.update_button.setEnabled(False)
         self.status.setText("Checking GitHub for a newer LectureWeave+ release…")
@@ -654,11 +723,11 @@ class MainWindow(QMainWindow):
         self.update_worker.start()
 
     def update_check_complete(self, release: dict) -> None:
-        self.update_button.setEnabled(True)
         tag = str(release.get("tag_name") or "").strip()
         latest = version_key(tag)
         current = version_key(APP_VERSION)
         if latest <= current:
+            self.update_button.setEnabled(True)
             self.status.setText(f"LectureWeave+ {APP_VERSION} is up to date.")
             QMessageBox.information(
                 self,
@@ -668,15 +737,20 @@ class MainWindow(QMainWindow):
             return
 
         assets = release.get("assets") or []
-        preferred_names = ("LectureWeavePlus-Setup.exe", "LectureWeavePlus-Portable.zip")
-        download_url = ""
-        for preferred in preferred_names:
-            match = next((asset for asset in assets if asset.get("name") == preferred), None)
-            if match:
-                download_url = str(match.get("browser_download_url") or "")
-                break
-        if not download_url:
-            download_url = str(release.get("html_url") or f"{REPOSITORY_URL}/releases/latest")
+        installer = next(
+            (asset for asset in assets if asset.get("name") == "LectureWeavePlus-Setup.exe"),
+            None,
+        )
+        if not installer:
+            self.update_check_failed("The latest release does not contain a Windows installer.")
+            return
+        download_url = str(installer.get("browser_download_url") or "")
+        digest = str(installer.get("digest") or "")
+        try:
+            release_asset_sha256(digest)
+        except ValueError as exc:
+            self.update_check_failed(str(exc))
+            return
 
         self.status.setText(f"LectureWeave+ {tag.lstrip('v')} is available.")
         answer = QMessageBox.question(
@@ -684,13 +758,63 @@ class MainWindow(QMainWindow):
             APP_NAME,
             f"LectureWeave+ {tag.lstrip('v')} is available.\n\n"
             f"Installed version: {APP_VERSION}\n\n"
-            "Open the official GitHub download now? Installing the newer version over "
-            "the current copy preserves locally cached models and transcripts.",
+            "Download and install it now?\n\n"
+            "LectureWeave+ will verify the installer, close, install the update, and "
+            "reopen automatically. Cached models and transcripts are preserved.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         )
         if answer == QMessageBox.StandardButton.Yes:
-            QDesktopServices.openUrl(QUrl(download_url))
+            self.start_update_download(download_url, digest, tag)
+        else:
+            self.update_button.setEnabled(True)
+            self.status.setText(f"LectureWeave+ {tag.lstrip('v')} is available.")
+
+    def start_update_download(self, url: str, digest: str, tag: str) -> None:
+        self.start_button.setEnabled(False)
+        self.progress.setRange(0, 0)
+        self.status.setText(f"Downloading LectureWeave+ {tag.lstrip('v')}…")
+        self.update_download_worker = UpdateDownloadThread(url, digest, tag)
+        self.update_download_worker.progress.connect(self.update_download_progress)
+        self.update_download_worker.completed.connect(self.update_download_complete)
+        self.update_download_worker.failed.connect(self.update_download_failed)
+        self.update_download_worker.start()
+
+    def update_download_progress(self, received: int, total: int) -> None:
+        if total > 0:
+            self.progress.setRange(0, total)
+            self.progress.setValue(received)
+            percent = received * 100 // total
+            self.status.setText(
+                f"Downloading update… {received / 1048576:.1f} of {total / 1048576:.1f} MB ({percent}%)"
+            )
+        else:
+            self.progress.setRange(0, 0)
+            self.status.setText(f"Downloading update… {received / 1048576:.1f} MB")
+
+    def update_download_complete(self, installer: str) -> None:
+        self.progress.setRange(0, 1)
+        self.progress.setValue(1)
+        self.status.setText("Update verified. Closing LectureWeave+ and installing…")
+        result = QProcess.startDetached(
+            installer,
+            ["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"],
+        )
+        started = result[0] if isinstance(result, tuple) else bool(result)
+        if not started:
+            self.update_download_failed(
+                "The verified installer was downloaded, but Windows could not start it."
+            )
+            return
+        QApplication.instance().quit()
+
+    def update_download_failed(self, message: str) -> None:
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        self.start_button.setEnabled(True)
+        self.update_button.setEnabled(True)
+        self.status.setText(message)
+        QMessageBox.warning(self, APP_NAME, message)
 
     def update_check_failed(self, message: str) -> None:
         self.update_button.setEnabled(True)
@@ -713,6 +837,8 @@ def run_self_test() -> int:
         return 6
     if plain[1]["start"] != 3923 or plain[1]["text"] != "It's almost a quasi privatisation of justice":
         return 7
+    if release_asset_sha256("sha256:" + "a" * 64) != "a" * 64:
+        return 8
     return 0
 
 

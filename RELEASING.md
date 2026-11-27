@@ -25,7 +25,8 @@ The workflow creates or updates the corresponding GitHub release with:
 
 The README download button always points to the installer attached to the
 latest release. Installed copies use the same GitHub release to check whether
-a newer version exists.
+a newer version exists, verify the installer against GitHub's published SHA-256
+asset digest, and run the in-place upgrade.
 
 ## Manual release build
 

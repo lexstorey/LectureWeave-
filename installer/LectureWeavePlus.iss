@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.2.1"
+  #define MyAppVersion "0.2.2"
 #endif
 
 #define MyAppName "LectureWeave+"
@@ -50,5 +50,5 @@ Name: "{group}\Check for updates"; Filename: "{#MyAppURL}/releases/latest"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Open {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "Open {#MyAppName}"; Flags: nowait postinstall
 
