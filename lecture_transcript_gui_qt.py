@@ -6,10 +6,13 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import sys
+import urllib.error
+import urllib.request
 
 from PySide6.QtCore import QThread, QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QDesktopServices, QDragEnterEvent, QDropEvent
+from PySide6.QtGui import QDesktopServices, QDragEnterEvent, QDropEvent, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -40,7 +43,10 @@ from lecture_to_docx import (
 )
 
 
-APP_NAME = "Lecture Transcript + Slides"
+APP_NAME = "LectureWeave+"
+APP_VERSION = "0.2.0"
+REPOSITORY_URL = "https://github.com/lexstorey/LectureWeave-"
+LATEST_RELEASE_API = "https://api.github.com/repos/lexstorey/LectureWeave-/releases/latest"
 PURPLE = "#4A148C"
 PURPLE_DARK = "#32105D"
 PURPLE_LIGHT = "#F2ECFA"
@@ -59,6 +65,17 @@ SELF_TEST_COMMENTS = """- **AMANDA SCHWARTZ**
 
   yes. thanks
 """
+
+
+def resource_path(relative: str) -> Path:
+    """Return a bundled PyInstaller resource or a source-tree resource."""
+    root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return root / relative
+
+
+def version_key(value: str) -> tuple[int, int, int]:
+    numbers = [int(number) for number in re.findall(r"\d+", value)[:3]]
+    return tuple((numbers + [0, 0, 0])[:3])
 
 
 class DropLineEdit(QLineEdit):
@@ -117,6 +134,32 @@ class SignalWriter(io.TextIOBase):
         if self.buffer.strip():
             self.signal.emit(self.buffer.strip())
         self.buffer = ""
+
+
+class UpdateCheckThread(QThread):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            request = urllib.request.Request(
+                LATEST_RELEASE_API,
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": f"LectureWeavePlus/{APP_VERSION}",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=12) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            self.completed.emit(payload)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                self.failed.emit("No published LectureWeave+ release is available yet.")
+            else:
+                self.failed.emit(f"GitHub returned HTTP {exc.code} while checking for updates.")
+        except Exception as exc:
+            self.failed.emit(f"Could not check for updates: {exc}")
 
 
 class ProcessingThread(QThread):
@@ -234,9 +277,13 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
+        icon_path = resource_path("assets/lectureweave-plus.ico")
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
         self.resize(1000, 850)
         self.setMinimumSize(820, 680)
         self.worker: ProcessingThread | None = None
+        self.update_worker: UpdateCheckThread | None = None
         self.last_output: Path | None = None
 
         self.setStyleSheet(
@@ -300,7 +347,8 @@ class MainWindow(QMainWindow):
         title = QLabel(APP_NAME)
         title.setObjectName("headerTitle")
         subtitle = QLabel(
-            "Turn a lecture video into a timestamped Word transcript with its slides and chat comments."
+            f"Version {APP_VERSION} · Turn a lecture video into a timestamped Word transcript "
+            "with its slides and chat comments."
         )
         subtitle.setObjectName("headerSubtitle")
         header_layout.addWidget(title)
@@ -443,8 +491,11 @@ class MainWindow(QMainWindow):
         self.open_button = QPushButton("Open finished document")
         self.open_button.setEnabled(False)
         self.open_button.clicked.connect(self.open_output)
+        self.update_button = QPushButton("Check for updates")
+        self.update_button.clicked.connect(self.check_for_updates)
         buttons.addWidget(self.start_button)
         buttons.addWidget(self.open_button)
+        buttons.addWidget(self.update_button)
         buttons.addStretch(1)
         action_layout.addLayout(buttons)
         body_layout.addWidget(action_card)
@@ -579,6 +630,60 @@ class MainWindow(QMainWindow):
         if self.last_output and self.last_output.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.last_output)))
 
+    def check_for_updates(self) -> None:
+        if self.update_worker and self.update_worker.isRunning():
+            return
+        self.update_button.setEnabled(False)
+        self.status.setText("Checking GitHub for a newer LectureWeave+ release…")
+        self.update_worker = UpdateCheckThread(self)
+        self.update_worker.completed.connect(self.update_check_complete)
+        self.update_worker.failed.connect(self.update_check_failed)
+        self.update_worker.start()
+
+    def update_check_complete(self, release: dict) -> None:
+        self.update_button.setEnabled(True)
+        tag = str(release.get("tag_name") or "").strip()
+        latest = version_key(tag)
+        current = version_key(APP_VERSION)
+        if latest <= current:
+            self.status.setText(f"LectureWeave+ {APP_VERSION} is up to date.")
+            QMessageBox.information(
+                self,
+                APP_NAME,
+                f"You already have the latest version of LectureWeave+ ({APP_VERSION}).",
+            )
+            return
+
+        assets = release.get("assets") or []
+        preferred_names = ("LectureWeavePlus-Setup.exe", "LectureWeavePlus-Portable.zip")
+        download_url = ""
+        for preferred in preferred_names:
+            match = next((asset for asset in assets if asset.get("name") == preferred), None)
+            if match:
+                download_url = str(match.get("browser_download_url") or "")
+                break
+        if not download_url:
+            download_url = str(release.get("html_url") or f"{REPOSITORY_URL}/releases/latest")
+
+        self.status.setText(f"LectureWeave+ {tag.lstrip('v')} is available.")
+        answer = QMessageBox.question(
+            self,
+            APP_NAME,
+            f"LectureWeave+ {tag.lstrip('v')} is available.\n\n"
+            f"Installed version: {APP_VERSION}\n\n"
+            "Open the official GitHub download now? Installing the newer version over "
+            "the current copy preserves locally cached models and transcripts.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            QDesktopServices.openUrl(QUrl(download_url))
+
+    def update_check_failed(self, message: str) -> None:
+        self.update_button.setEnabled(True)
+        self.status.setText(message)
+        QMessageBox.warning(self, APP_NAME, message)
+
 
 def run_self_test() -> int:
     parsed = parse_chat_comments(SELF_TEST_COMMENTS)
@@ -596,6 +701,10 @@ def main() -> None:
         raise SystemExit(run_self_test())
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
+    icon_path = resource_path("assets/lectureweave-plus.ico")
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
     app.setStyle("Fusion")
     window = MainWindow()
     window.show()

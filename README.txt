@@ -1,9 +1,11 @@
-LECTURE TRANSCRIPT + SLIDES TOOL
-================================
+LECTUREWEAVE+
+=============
+
+Slides, speech and chat--kept in sync.
 
 What it does
 ------------
-This tool finds stable slide changes in a lecture recording, transcribes the
+LectureWeave+ finds stable slide changes in a lecture recording, transcribes the
 audio locally with Faster Whisper, matches each piece of speech to the slide
 that was visible, and creates a Word document.
 
@@ -34,8 +36,8 @@ First-run notes
   libraries are unavailable, the tool falls back to CPU processing.
 * A one-hour recording can take a while on CPU, but no transcription credits
   are used.
-* Models and temporary processing files are cached under:
-    %LOCALAPPDATA%\LectureTranscriptTool
+* Models and temporary processing files are cached locally under your Windows
+  application-data folder.
 
 Accuracy
 --------

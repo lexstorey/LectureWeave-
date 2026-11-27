@@ -2,6 +2,10 @@
 
 **Slides, speech and chat—kept in sync.**
 
+[![Download LectureWeave+ for Windows](https://img.shields.io/badge/Download_for_Windows-LectureWeave%2B-4A148C?style=for-the-badge&logo=windows)](https://github.com/lexstorey/LectureWeave-/releases/latest/download/LectureWeavePlus-Setup.exe)
+
+[Download the Windows installer](https://github.com/lexstorey/LectureWeave-/releases/latest/download/LectureWeavePlus-Setup.exe) · [Portable ZIP](https://github.com/lexstorey/LectureWeave-/releases/latest/download/LectureWeavePlus-Portable.zip) · [All releases](https://github.com/lexstorey/LectureWeave-/releases)
+
 LectureWeave+ is a local-first Windows desktop application that converts a
 lecture recording into a timestamped Word document containing detected slides,
 machine-generated transcript text and optional chat comments.
@@ -15,6 +19,19 @@ machine-generated transcript text and optional chat comments.
 - Word document generation with slide images and aligned transcript text
 - Cached transcripts for faster regeneration
 - CPU fallback and NVIDIA CUDA acceleration when available
+- In-app update checking against official GitHub releases
+
+## Installing and updating
+
+Download `LectureWeavePlus-Setup.exe` from the button above. The installer adds
+Start-menu and optional desktop shortcuts. Installing a newer release over an
+existing copy updates the application while leaving locally cached models and
+transcripts in place.
+
+Inside LectureWeave+, select **Check for updates** to compare the installed
+version with the latest GitHub release and open the official installer download.
+The portable ZIP is available for users who do not want an installer, but it
+must be extracted fully before the EXE is opened.
 
 ## Project status
 
@@ -23,9 +40,18 @@ Windows prototype. Planned improvements include OCR-derived terminology,
 confidence-aware transcription repair, adaptive slide detection, a synchronized
 review workspace and Claude-ready Markdown export. See [ROADMAP.md](ROADMAP.md).
 
+Maintainers can publish an updated installer by following
+[RELEASING.md](RELEASING.md).
+
 ## Privacy and rights
 
 Processing is local by default. Only process recordings and comments you are
 authorised to access and use. Automatic transcripts can contain errors and
 should be checked against the recording when accuracy matters.
+
+## Licence
+
+LectureWeave+ is released under the [MIT License](LICENSE). See
+[THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) for bundled dependencies and
+attribution requirements.
 
