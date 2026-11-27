@@ -22,8 +22,9 @@ machine-generated transcript text and optional chat comments.
 - Timestamped Blackboard-style chat comment import
 - Review screen for correcting deck numbers, slide text and transcript before export
 - Word document generation that separates slide text from the lecturer's discussion
-- Claude-ready Markdown, structured JSON, slide assets and a self-contained ZIP packet
-- Windows-safe, shortened Claude bundle paths so long lecture titles still extract normally
+- One final Word document per generation, without duplicate ZIP, Markdown or JSON outputs
+- Generation settings lock while a job is running, with cooperative cancellation and cleanup
+- Mouse-wheel-safe model selection to prevent accidental accuracy changes while scrolling
 - Optional external WhisperX word alignment and anonymous speaker labels
 - A masked Hugging Face token field backed by Windows Credential Manager, so
   speaker access can be saved once without placing the token in settings files
@@ -61,8 +62,8 @@ must be extracted fully before the EXE is opened.
 
 LectureWeave+ is under active development. The current version is a working
 Windows prototype. Planned improvements include OCR-derived terminology,
-confidence-aware transcription repair, adaptive slide detection, a synchronized
-review workspace and Claude-ready Markdown export. See [ROADMAP.md](ROADMAP.md).
+confidence-aware transcription repair, adaptive slide detection and a synchronized
+review workspace. See [ROADMAP.md](ROADMAP.md).
 
 Maintainers can publish an updated installer by following
 [RELEASING.md](RELEASING.md).

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import html
 import io
 import json
@@ -14,7 +13,6 @@ import shutil
 import sys
 import time
 from typing import Any, Callable
-import zipfile
 
 ROOT = Path(__file__).resolve().parent
 VENDOR = ROOT / "vendor"
@@ -53,25 +51,6 @@ LEGAL_PROMPT = (
 )
 
 ProgressCallback = Callable[[str, int, int, str], None]
-CLAUDE_BASENAME_LIMIT = 48
-
-
-def claude_output_paths(output_path: Path) -> dict[str, Path]:
-    """Return short, stable companion paths that remain extractable on Windows."""
-    stem = output_path.with_suffix("")
-    base = re.sub(r"\s+Transcript and Slides$", "", stem.name, flags=re.IGNORECASE)
-    base = re.sub(r'[<>:"/\\|?*]+', "-", base).strip(" .-") or "Lecture"
-    if len(base) > CLAUDE_BASENAME_LIMIT:
-        digest = hashlib.sha256(stem.name.encode("utf-8")).hexdigest()[:8]
-        base = f"{base[:CLAUDE_BASENAME_LIMIT - 9].rstrip()}-{digest}"
-    return {
-        "markdown": stem.with_name(base + " - Notes.md"),
-        "project": stem.with_name(base + " - Project.json"),
-        "packet": stem.with_name(base + " - Claude.zip"),
-        "assets": stem.with_name(base + " - Assets"),
-    }
-
-
 def format_time(seconds: float, include_ms: bool = False) -> str:
     seconds = max(0.0, float(seconds))
     whole = int(seconds)
@@ -809,138 +788,6 @@ def write_transcript_files(segments: list[dict[str, Any]], output_dir: Path) -> 
                 f"{index}\n{format_time(segment['start'], True)} --> "
                 f"{format_time(segment['end'], True)}\n{segment['text']}\n\n"
             )
-
-
-def write_claude_packet(
-    video_path: Path,
-    slides: list[dict[str, Any]],
-    duration: float,
-    output_path: Path,
-    title_text: str,
-    model_name: str,
-    progress_callback: ProgressCallback | None = None,
-) -> dict[str, str]:
-    """Write explicit slide-text/discussion artifacts for downstream note generation."""
-    paths = claude_output_paths(output_path)
-    markdown_path = paths["markdown"]
-    project_path = paths["project"]
-    packet_path = paths["packet"]
-    assets_dir = paths["assets"]
-    slide_assets_dir = assets_dir / "slides"
-    slide_assets_dir.mkdir(parents=True, exist_ok=True)
-
-    lines = [
-        f"# {title_text}",
-        "",
-        "> This file deliberately separates the words printed on each slide from the lecturer's spoken discussion. ",
-        "> When making notes, treat **Slide text** as source material already visible to students and ",
-        "> **Lecturer discussion** as explanation, examples, qualifications, and additional information given while that slide was displayed.",
-        "",
-        f"- Source video: `{video_path.name}`",
-        f"- Duration: {format_time(duration)}",
-        f"- Transcription model: {model_name}",
-        f"- Video slide appearances: {len(slides)}",
-        "",
-    ]
-    project_slides: list[dict[str, Any]] = []
-    image_entries: list[tuple[Path, str]] = []
-    for position, slide in enumerate(slides, 1):
-        if progress_callback:
-            progress_callback(
-                "claude_export", position - 1, len(slides),
-                f"Building Claude-ready packet — slide appearance {position} of {len(slides)}",
-            )
-        deck_number = slide.get("deck_slide_number")
-        identity = f"Deck slide {deck_number}" if deck_number else "Unmatched captured slide"
-        heading = f"{identity} — video appearance {position} — {format_time(slide['start'])}"
-        image_source = Path(slide.get("deck_image") or slide["image"])
-        safe_identity = f"deck-{int(deck_number):03d}" if deck_number else "unmatched"
-        extension = image_source.suffix.lower() or ".png"
-        image_filename = f"{safe_identity}-appearance-{position:03d}{extension}"
-        archive_image = f"{assets_dir.name}/slides/{image_filename}"
-        image_entries.append((image_source, archive_image))
-        local_image = slide_assets_dir / image_filename
-        if image_source.is_file() and not local_image.exists():
-            shutil.copy2(image_source, local_image)
-        lines.extend([
-            f"## {heading}",
-            "",
-            f"- Deck slide number: {deck_number if deck_number else 'not confidently matched'}",
-            f"- Video appearance number: {position}",
-            f"- Displayed: {format_time(slide['start'])}–{format_time(slide['end'])}",
-            f"- Slide-text source: {slide.get('text_source', 'not available')}",
-            "",
-            f"![{heading}]({archive_image})",
-            "",
-            "### Slide text (material already displayed on the slide)",
-            "",
-            str(slide.get("slide_text") or "No reliable slide text was extracted."),
-            "",
-            "### Lecturer discussion while this slide was displayed",
-            "",
-        ])
-        segments = slide.get("segments", [])
-        if segments:
-            lines.extend(
-                f"[{format_time(segment['start'])}] "
-                f"{(str(segment.get('speaker')) + ': ') if segment.get('speaker') else ''}"
-                f"{segment['text']}"
-                for segment in segments
-            )
-        else:
-            lines.append("No speech was detected during this appearance.")
-        lines.extend(["", "### Chat comments during this slide", ""])
-        comments = slide.get("comments", [])
-        if comments:
-            lines.extend(
-                f"- [{format_time(comment['start'])}] **{comment['author']}:** {comment['text']}"
-                for comment in comments
-            )
-        else:
-            lines.append("No timestamped chat comments.")
-        lines.extend(["", "---", ""])
-        project_slides.append({
-            "deck_slide_number": deck_number,
-            "video_appearance_number": position,
-            "canonical_video_slide": slide.get("canonical_index"),
-            "start": slide["start"],
-            "end": slide["end"],
-            "image": archive_image,
-            "slide_text": slide.get("slide_text", ""),
-            "slide_text_source": slide.get("text_source", ""),
-            "lecturer_discussion": segments,
-            "chat_comments": comments,
-        })
-
-    markdown_text = "\n".join(lines)
-    markdown_path.write_text(markdown_text, encoding="utf-8")
-    project = {
-        "schema": "lectureweave-project-v1",
-        "title": title_text,
-        "source_video": video_path.name,
-        "duration_seconds": duration,
-        "transcription_model": model_name,
-        "slides": project_slides,
-    }
-    project_path.write_text(json.dumps(project, indent=2, ensure_ascii=False), encoding="utf-8")
-    with zipfile.ZipFile(packet_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(markdown_path.name, markdown_text)
-        archive.writestr(project_path.name, json.dumps(project, indent=2, ensure_ascii=False))
-        included: set[str] = set()
-        for source, archive_name in image_entries:
-            if archive_name in included or not source.is_file():
-                continue
-            archive.write(source, archive_name)
-            included.add(archive_name)
-    if progress_callback:
-        progress_callback(
-            "claude_export", len(slides), len(slides), "Claude-ready Markdown, JSON and ZIP created."
-        )
-    return {
-        "markdown": str(markdown_path),
-        "project": str(project_path),
-        "packet": str(packet_path),
-    }
 
 
 def align_segments(

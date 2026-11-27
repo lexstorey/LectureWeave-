@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import tempfile
 import threading
@@ -65,7 +66,6 @@ from whisperx_bridge import (
 from lecture_to_docx import (
     align_segments,
     build_docx,
-    claude_output_paths,
     detect_slides,
     format_time,
     omit_incidental_slide_appearances,
@@ -74,12 +74,11 @@ from lecture_to_docx import (
     transcribe,
     whisper_model_is_cached,
     write_transcript_files,
-    write_claude_packet,
 )
 
 
 APP_NAME = "LectureWeave+"
-APP_VERSION = "0.3.6"
+APP_VERSION = "0.3.7"
 REPOSITORY_URL = "https://github.com/lexstorey/LectureWeave-"
 PURPLE = "#4A148C"
 PURPLE_DARK = "#32105D"
@@ -220,6 +219,13 @@ class DropLineEdit(QLineEdit):
             event.acceptProposedAction()
 
 
+class WheelSafeComboBox(QComboBox):
+    """Prevent page scrolling from accidentally changing a selected option."""
+
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        event.ignore()
+
+
 class DropArea(QLabel):
     file_dropped = Signal(str)
 
@@ -258,6 +264,10 @@ class SignalWriter(io.TextIOBase):
         if self.buffer.strip():
             self.signal.emit(self.buffer.strip())
         self.buffer = ""
+
+
+class ProcessingCancelled(RuntimeError):
+    """Raised cooperatively when the user cancels the active generation."""
 
 
 class UpdateCheckThread(QThread):
@@ -363,6 +373,7 @@ class ProcessingThread(QThread):
     log = Signal(str)
     completed = Signal(str)
     failed = Signal(str)
+    cancelled = Signal()
     review_requested = Signal(object)
 
     def __init__(
@@ -390,13 +401,25 @@ class ProcessingThread(QThread):
         self.whisperx_python = whisperx_python
         self.hf_token = hf_token
         self.review_event = threading.Event()
+        self.cancel_event = threading.Event()
         self.reviewed_slides: list[dict] | None = None
 
     def apply_review(self, slides: list[dict] | None) -> None:
         self.reviewed_slides = slides
         self.review_event.set()
 
+    def cancel(self) -> None:
+        self.cancel_event.set()
+        self.requestInterruption()
+        self.reviewed_slides = None
+        self.review_event.set()
+
+    def raise_if_cancelled(self) -> None:
+        if self.cancel_event.is_set() or self.isInterruptionRequested():
+            raise ProcessingCancelled("Generation cancelled by the user.")
+
     def report_progress(self, stage: str, current: int, total: int, detail: str) -> None:
+        self.raise_if_cancelled()
         self.status.emit(detail)
         if total > 0:
             scaled = min(1000, max(0, int(current * 1000 / total)))
@@ -412,6 +435,9 @@ class ProcessingThread(QThread):
             f"{self.video}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8")
         ).hexdigest()[:20]
         work_dir = cache_root / "jobs" / fingerprint
+        staging_output = self.output.with_name(
+            f".{self.output.stem}.lectureweave-partial.docx"
+        )
         slides_dir = work_dir / "slides"
         model_cache_key = re.sub(r"[^0-9A-Za-z._-]+", "-", self.model_name)
         model_cache = cache_root / "models"
@@ -421,6 +447,7 @@ class ProcessingThread(QThread):
         writer = SignalWriter(self.log)
         try:
             with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
+                self.raise_if_cancelled()
                 self.status.emit(f"Preparing the Whisper {self.model_name} speech model…")
                 prepare_whisper_model(
                     self.model_name,
@@ -536,10 +563,11 @@ class ProcessingThread(QThread):
                     )
 
                 self.status.emit("Waiting for slide and transcript review…")
+                self.raise_if_cancelled()
                 self.review_requested.emit(copy.deepcopy(slides))
                 self.review_event.wait()
                 if self.reviewed_slides is None:
-                    raise RuntimeError("Processing was cancelled during review.")
+                    raise ProcessingCancelled("Generation cancelled during review.")
                 slides = self.reviewed_slides
                 print(f"Review accepted with {len(slides)} slide appearances")
 
@@ -575,28 +603,28 @@ class ProcessingThread(QThread):
                     self.video,
                     slides,
                     duration,
-                    self.output,
+                    staging_output,
                     device,
                     self.title,
                     len(omitted_slides),
                     progress_callback=self.report_progress,
                 )
-                outputs = write_claude_packet(
-                    self.video,
-                    slides,
-                    duration,
-                    self.output,
-                    self.title,
-                    self.model_name,
-                    self.report_progress,
-                )
+                self.raise_if_cancelled()
+                os.replace(staging_output, self.output)
                 print(f"Imported {len(self.comments)} chat comments")
                 print(f"Created {self.output}")
-                print(f"Created Claude packet {outputs['packet']}")
             writer.flush()
             self.completed.emit(str(self.output))
+        except ProcessingCancelled:
+            writer.flush()
+            if staging_output.exists():
+                staging_output.unlink()
+            shutil.rmtree(work_dir, ignore_errors=True)
+            self.cancelled.emit()
         except Exception as exc:
             writer.flush()
+            if staging_output.exists():
+                staging_output.unlink()
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
@@ -616,7 +644,7 @@ class ReviewDialog(QDialog):
         root.addWidget(heading)
         explanation = QLabel(
             "Check the actual deck slide number, slide text and lecturer transcript. "
-            "The Claude packet keeps these as separate evidence. Use 0 when a video frame "
+            "The Word document keeps these as separate evidence. Use 0 when a video frame "
             "does not confidently match the supplied deck."
         )
         explanation.setWordWrap(True)
@@ -935,7 +963,7 @@ class MainWindow(QMainWindow):
         title.setObjectName("headerTitle")
         subtitle = QLabel(
             f"Version {APP_VERSION} · Align a lecture with its real deck slides, spoken discussion "
-            "and chat—then export Word and Claude-ready notes."
+            "and chat—then export one organised Word document."
         )
         subtitle.setObjectName("headerSubtitle")
         header_layout.addWidget(title)
@@ -1145,7 +1173,7 @@ class MainWindow(QMainWindow):
         quality_row = QHBoxLayout()
         quality_label = self.hint_label("Accuracy")
         quality_label.setFixedWidth(72)
-        self.model_combo = QComboBox()
+        self.model_combo = WheelSafeComboBox()
         self.model_combo.addItem("Maximum accuracy — Large-v3 (recommended)", "large-v3")
         self.model_combo.addItem("Faster — Turbo", "turbo")
         quality_row.addWidget(quality_label)
@@ -1168,6 +1196,7 @@ class MainWindow(QMainWindow):
         details_layout.addWidget(self.reuse_check)
         details_layout.addWidget(self.omit_check)
         body_layout.addWidget(details_card)
+        self.configuration_cards = [video_card, comments_card, details_card]
 
         action_card, action_layout = self.card()
         self.progress = QProgressBar()
@@ -1187,6 +1216,9 @@ class MainWindow(QMainWindow):
         self.start_button = QPushButton("Create Word document")
         self.start_button.setObjectName("primary")
         self.start_button.clicked.connect(self.start_processing)
+        self.cancel_button = QPushButton("Cancel generation")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.cancel_processing)
         self.open_button = QPushButton("Open finished document")
         self.open_button.setEnabled(False)
         self.open_button.clicked.connect(self.open_output)
@@ -1196,6 +1228,7 @@ class MainWindow(QMainWindow):
         self.update_button = QPushButton("Check for updates")
         self.update_button.clicked.connect(self.check_for_updates)
         buttons.addWidget(self.start_button)
+        buttons.addWidget(self.cancel_button)
         buttons.addWidget(self.open_button)
         buttons.addWidget(self.folder_button)
         buttons.addWidget(self.update_button)
@@ -1493,6 +1526,29 @@ class MainWindow(QMainWindow):
         else:
             self.comment_count.setText("No timestamped comments detected")
 
+    def set_generation_active(self, active: bool) -> None:
+        """Lock every generation setting while preserving the cancel control."""
+        for card in self.configuration_cards:
+            card.setEnabled(not active)
+        self.start_button.setEnabled(not active)
+        self.cancel_button.setEnabled(active)
+        self.update_button.setEnabled(not active)
+
+    def cancel_processing(self) -> None:
+        if not self.worker or not self.worker.isRunning():
+            return
+        answer = QMessageBox.question(
+            self,
+            APP_NAME,
+            "Cancel this generation and delete its temporary progress files? "
+            "Previously completed Word documents will not be changed.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.cancel_button.setEnabled(False)
+        self.status.setText("Cancelling and removing temporary progress…")
+        self.worker.cancel()
+
     def start_processing(self) -> None:
         if self.worker and self.worker.isRunning():
             return
@@ -1539,7 +1595,7 @@ class MainWindow(QMainWindow):
             return
 
         self.log.clear()
-        self.start_button.setEnabled(False)
+        self.set_generation_active(True)
         self.open_button.setEnabled(False)
         self.folder_button.setEnabled(False)
         self.progress.setRange(0, 0)
@@ -1564,6 +1620,7 @@ class MainWindow(QMainWindow):
         self.worker.review_requested.connect(self.review_processing)
         self.worker.completed.connect(self.processing_complete)
         self.worker.failed.connect(self.processing_failed)
+        self.worker.cancelled.connect(self.processing_cancelled)
         self.worker.start()
 
     def preflight_whisperx(self) -> tuple[bool, Path | None]:
@@ -1610,7 +1667,7 @@ class MainWindow(QMainWindow):
         dialog = ReviewDialog(slides, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             reviewed = dialog.reviewed_slides()
-            self.status.setText("Review accepted. Creating Word and Claude-ready outputs…")
+            self.status.setText("Review accepted. Creating the Word document…")
             self.worker.apply_review(reviewed)
         else:
             self.status.setText("Processing cancelled during review.")
@@ -1722,26 +1779,31 @@ class MainWindow(QMainWindow):
     def processing_complete(self, value: str) -> None:
         self.progress.setRange(0, 1)
         self.progress.setValue(1)
-        self.start_button.setEnabled(True)
+        self.set_generation_active(False)
         self.open_button.setEnabled(True)
         self.folder_button.setEnabled(True)
         self.last_output = Path(value)
-        packet = claude_output_paths(self.last_output)["packet"]
-        self.status.setText("Finished. Word and Claude-ready outputs are ready.")
+        self.status.setText("Finished. The Word document is ready.")
         QMessageBox.information(
             self,
             APP_NAME,
-            f"Finished creating:\n\nWord: {value}\n\nClaude packet: {packet}",
+            f"Finished creating:\n\n{value}",
         )
+
+    def processing_cancelled(self) -> None:
+        self.progress.setRange(0, 1)
+        self.progress.setValue(0)
+        self.set_generation_active(False)
+        self.open_button.setEnabled(False)
+        self.folder_button.setEnabled(False)
+        self.last_output = None
+        self.log.clear()
+        self.status.setText("Generation cancelled. Temporary progress files were removed.")
 
     def processing_failed(self, value: str) -> None:
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
-        self.start_button.setEnabled(True)
-        if "cancelled during review" in value.lower():
-            self.status.setText("Processing cancelled during review. No outputs were overwritten.")
-            self.append_log(value)
-            return
+        self.set_generation_active(False)
         self.status.setText("Processing stopped because of an error.")
         self.append_log(value)
         QMessageBox.critical(self, APP_NAME, value)
