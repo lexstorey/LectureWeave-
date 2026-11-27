@@ -456,19 +456,34 @@ def materialize_whisper_snapshot(snapshot: Path, destination: Path, repo_cache: 
         "vocabulary.txt",
     )
     destination.mkdir(parents=True, exist_ok=True)
-    cache_root = os.path.normcase(os.path.abspath(str(repo_cache)))
+    # Newer Hugging Face Xet caches can use two link layers: the snapshot links
+    # to a repository blob, which links again to a shared blob beside the repo.
+    # Resolve each layer textually before opening it so Windows never traverses
+    # the reparse point that can trigger WinError 448.
+    cache_root = os.path.normcase(os.path.abspath(str(repo_cache.parent)))
     copied = 0
     for name in names:
         entry = snapshot / name
         if not os.path.lexists(str(entry)):
             continue
         source = entry
-        if os.path.islink(str(entry)):
-            target = os.readlink(str(entry))
-            source = Path(os.path.normpath(os.path.join(str(entry.parent), target)))
+        visited: set[str] = set()
+        for _hop in range(8):
+            source_path = os.path.normcase(os.path.abspath(str(source)))
+            if os.path.commonpath((cache_root, source_path)) != cache_root:
+                raise RuntimeError(
+                    f"Refusing model link outside the Hugging Face cache: {name}"
+                )
+            if source_path in visited:
+                raise RuntimeError(f"Circular Hugging Face model link: {name}")
+            visited.add(source_path)
+            if not os.path.islink(str(source)):
+                break
+            target = os.readlink(str(source))
+            source = Path(os.path.normpath(os.path.join(str(source.parent), target)))
+        else:
+            raise RuntimeError(f"Too many Hugging Face model link layers: {name}")
         source_path = os.path.normcase(os.path.abspath(str(source)))
-        if os.path.commonpath((cache_root, source_path)) != cache_root:
-            raise RuntimeError(f"Refusing model link outside the Hugging Face cache: {name}")
         source_size = os.stat(source_path).st_size
         if source_size <= 0:
             continue
