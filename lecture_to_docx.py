@@ -621,6 +621,26 @@ def prepare_whisper_model(
     raise RuntimeError(f"Could not download a complete Whisper model: {last_error}")
 
 
+def bounded_whisper_hotwords(model: Any, hotwords: str, maximum_tokens: int = 96) -> str:
+    """Keep terminology useful without exhausting Whisper's decoding context.
+
+    Faster Whisper combines hotwords with up to half a context window of prior
+    transcript. Its own hotword cap can therefore still leave zero tokens for
+    decoding. Reserve most of the window for speech and continuity instead.
+    """
+    cleaned = re.sub(r"\s+", " ", hotwords).strip(" ,")
+    if not cleaned:
+        return ""
+    encoding = model.hf_tokenizer.encode(
+        " " + cleaned,
+        add_special_tokens=False,
+    )
+    token_ids = list(encoding.ids)
+    if len(token_ids) <= maximum_tokens:
+        return cleaned
+    return model.hf_tokenizer.decode(token_ids[:maximum_tokens]).strip(" ,")
+
+
 def transcribe(
     video_path: Path,
     work_dir: Path,
@@ -670,6 +690,13 @@ def transcribe(
                 device=device,
                 compute_type=compute_type,
             )
+            safe_hotwords = bounded_whisper_hotwords(model, hotwords)
+            if hotwords and safe_hotwords != hotwords:
+                print(
+                    f"Limited slide terminology from {len(hotwords)} to "
+                    f"{len(safe_hotwords)} characters to preserve decoding context",
+                    flush=True,
+                )
             iterator, info = model.transcribe(
                 str(video_path),
                 language="en",
@@ -678,7 +705,7 @@ def transcribe(
                 vad_filter=True,
                 condition_on_previous_text=True,
                 initial_prompt=initial_prompt,
-                hotwords=hotwords or None,
+                hotwords=safe_hotwords or None,
                 word_timestamps=True,
             )
             if progress_callback:
