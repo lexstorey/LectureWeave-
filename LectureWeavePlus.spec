@@ -7,7 +7,15 @@ datas = [
 binaries = []
 hiddenimports = []
 
-for package in ("faster_whisper", "ctranslate2", "tokenizers", "av", "hf_xet"):
+for package in (
+    "faster_whisper",
+    "ctranslate2",
+    "tokenizers",
+    "av",
+    "hf_xet",
+    "rapidocr",
+    "pypdfium2",
+):
     package_data, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_data
     binaries += package_binaries

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import ctypes
 import hashlib
 import io
@@ -10,47 +11,63 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from PySide6.QtCore import QProcess, QThread, QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QDesktopServices, QDragEnterEvent, QDropEvent, QIcon
+from PySide6.QtGui import QDesktopServices, QDragEnterEvent, QDropEvent, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMainWindow,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
+    QSplitter,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
+from content_enrichment import (
+    extract_slide_deck,
+    match_deck_pages,
+    run_slide_ocr,
+    transcription_vocabulary,
+)
+from whisperx_bridge import enhance_with_whisperx, whisperx_environment_ready
+
 from lecture_to_docx import (
     align_segments,
     build_docx,
     detect_slides,
+    format_time,
     omit_incidental_slide_appearances,
     parse_chat_comments,
     prepare_whisper_model,
     transcribe,
     whisper_model_is_cached,
     write_transcript_files,
+    write_claude_packet,
 )
 
 
 APP_NAME = "LectureWeave+"
-APP_VERSION = "0.2.6"
+APP_VERSION = "0.3.0"
 REPOSITORY_URL = "https://github.com/lexstorey/LectureWeave-"
 PURPLE = "#4A148C"
 PURPLE_DARK = "#32105D"
@@ -59,6 +76,7 @@ BACKGROUND = "#F5F4F8"
 TEXT = "#26232B"
 BLACKBOARD_VIDEO_COMMAND = 'copy(document.querySelector("video")?.currentSrc)'
 GPU_SETUP_URL = "https://github.com/SYSTRAN/faster-whisper#gpu"
+WHISPERX_SETUP_URL = "https://github.com/m-bain/whisperX"
 
 
 def model_cache_root() -> Path:
@@ -302,6 +320,7 @@ class ProcessingThread(QThread):
     log = Signal(str)
     completed = Signal(str)
     failed = Signal(str)
+    review_requested = Signal(object)
 
     def __init__(
         self,
@@ -312,6 +331,8 @@ class ProcessingThread(QThread):
         reuse_transcript: bool,
         omit_brief_slides: bool,
         model_name: str,
+        deck_path: Path | None,
+        whisperx_python: Path | None,
     ) -> None:
         super().__init__()
         self.video = video
@@ -321,6 +342,14 @@ class ProcessingThread(QThread):
         self.reuse_transcript = reuse_transcript
         self.omit_brief_slides = omit_brief_slides
         self.model_name = model_name
+        self.deck_path = deck_path
+        self.whisperx_python = whisperx_python
+        self.review_event = threading.Event()
+        self.reviewed_slides: list[dict] | None = None
+
+    def apply_review(self, slides: list[dict] | None) -> None:
+        self.reviewed_slides = slides
+        self.review_event.set()
 
     def report_progress(self, stage: str, current: int, total: int, detail: str) -> None:
         self.status.emit(detail)
@@ -340,7 +369,6 @@ class ProcessingThread(QThread):
         work_dir = cache_root / "jobs" / fingerprint
         slides_dir = work_dir / "slides"
         model_cache_key = re.sub(r"[^0-9A-Za-z._-]+", "-", self.model_name)
-        transcript_dir = work_dir / f"transcript-{model_cache_key}"
         model_cache = cache_root / "models"
         work_dir.mkdir(parents=True, exist_ok=True)
         self.output.parent.mkdir(parents=True, exist_ok=True)
@@ -362,6 +390,35 @@ class ProcessingThread(QThread):
                 )
                 print(f"Detected {len(slides)} stable slide appearances")
 
+                if self.deck_path:
+                    deck_fingerprint = hashlib.sha256(
+                        (
+                            f"{self.deck_path}|{self.deck_path.stat().st_size}|"
+                            f"{self.deck_path.stat().st_mtime_ns}"
+                        ).encode("utf-8")
+                    ).hexdigest()[:16]
+                    deck_pages = extract_slide_deck(
+                        self.deck_path,
+                        work_dir / "deck" / deck_fingerprint,
+                        self.report_progress,
+                    )
+                    self.status.emit("Extracting searchable text from the captured slides…")
+                    run_slide_ocr(slides, self.report_progress)
+                    match_deck_pages(slides, deck_pages)
+                    matched = sum(bool(slide.get("deck_slide_number")) for slide in slides)
+                    print(
+                        f"Matched {matched} of {len(slides)} video appearances to "
+                        f"{len(deck_pages)} supplied deck slides"
+                    )
+                else:
+                    self.status.emit("Extracting searchable text from the slides…")
+                    run_slide_ocr(slides, self.report_progress)
+                vocabulary = transcription_vocabulary(slides)
+                vocabulary_key = hashlib.sha256(vocabulary.encode("utf-8")).hexdigest()[:12]
+                transcript_dir = work_dir / f"transcript-{model_cache_key}-{vocabulary_key}"
+                if vocabulary:
+                    print(f"Prepared {len(vocabulary)} characters of slide-derived terminology")
+
                 transcript_json = transcript_dir / "transcript.json"
                 if self.reuse_transcript and transcript_json.exists():
                     self.status.emit("Loading the cached local transcript…")
@@ -379,9 +436,27 @@ class ProcessingThread(QThread):
                         self.model_name,
                         model_cache=model_cache,
                         progress_callback=self.report_progress,
+                        hotwords=vocabulary,
                     )
                     write_transcript_files(segments, transcript_dir)
                     print(f"Transcribed {len(segments)} timestamped speech segments")
+
+                if self.whisperx_python:
+                    aligned_cache = transcript_dir / "whisperx-aligned.json"
+                    if self.reuse_transcript and aligned_cache.is_file():
+                        segments = json.loads(aligned_cache.read_text(encoding="utf-8"))
+                        print("Loaded cached WhisperX word alignment")
+                    else:
+                        segments = enhance_with_whisperx(
+                            self.video,
+                            segments,
+                            transcript_dir,
+                            self.whisperx_python,
+                            self.report_progress,
+                        )
+                        aligned_cache.write_text(
+                            json.dumps(segments, indent=2, ensure_ascii=False), encoding="utf-8"
+                        )
 
                 self.report_progress(
                     "alignment",
@@ -397,6 +472,14 @@ class ProcessingThread(QThread):
                         f"Omitted {len(omitted_slides)} brief navigation slide appearances"
                     )
 
+                self.status.emit("Waiting for slide and transcript review…")
+                self.review_requested.emit(copy.deepcopy(slides))
+                self.review_event.wait()
+                if self.reviewed_slides is None:
+                    raise RuntimeError("Processing was cancelled during review.")
+                slides = self.reviewed_slides
+                print(f"Review accepted with {len(slides)} slide appearances")
+
                 alignment = [
                     {
                         key: value
@@ -410,6 +493,12 @@ class ProcessingThread(QThread):
                             "image",
                             "segments",
                             "comments",
+                            "canonical_index",
+                            "deck_slide_number",
+                            "deck_text",
+                            "deck_image",
+                            "slide_text",
+                            "text_source",
                         }
                     }
                     for slide in slides
@@ -429,13 +518,232 @@ class ProcessingThread(QThread):
                     len(omitted_slides),
                     progress_callback=self.report_progress,
                 )
+                outputs = write_claude_packet(
+                    self.video,
+                    slides,
+                    duration,
+                    self.output,
+                    self.title,
+                    self.model_name,
+                    self.report_progress,
+                )
                 print(f"Imported {len(self.comments)} chat comments")
                 print(f"Created {self.output}")
+                print(f"Created Claude packet {outputs['packet']}")
             writer.flush()
             self.completed.emit(str(self.output))
         except Exception as exc:
             writer.flush()
             self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
+class ReviewDialog(QDialog):
+    """Review deck numbering, extracted text and transcript before export."""
+
+    def __init__(self, slides: list[dict], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.slides = slides
+        self.current_row = -1
+        self.setWindowTitle("Review lecture alignment — LectureWeave+")
+        self.resize(1180, 760)
+
+        root = QVBoxLayout(self)
+        heading = QLabel("Review slides before export")
+        heading.setObjectName("section")
+        root.addWidget(heading)
+        explanation = QLabel(
+            "Check the actual deck slide number, slide text and lecturer transcript. "
+            "The Claude packet keeps these as separate evidence. Use 0 when a video frame "
+            "does not confidently match the supplied deck."
+        )
+        explanation.setWordWrap(True)
+        root.addWidget(explanation)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.slide_list = QListWidget()
+        self.slide_list.setMinimumWidth(300)
+        splitter.addWidget(self.slide_list)
+
+        editor = QWidget()
+        editor_layout = QVBoxLayout(editor)
+        self.preview = QLabel("Slide preview")
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview.setMinimumHeight(250)
+        self.preview.setStyleSheet("background: #17131B; color: white; border-radius: 6px;")
+        editor_layout.addWidget(self.preview)
+
+        controls = QHBoxLayout()
+        self.include_check = QCheckBox("Include this appearance")
+        self.include_check.setChecked(True)
+        controls.addWidget(self.include_check)
+        controls.addWidget(QLabel("Actual deck slide number (0 = unmatched)"))
+        self.deck_number = QSpinBox()
+        self.deck_number.setRange(0, 9999)
+        controls.addWidget(self.deck_number)
+        self.merge_button = QPushButton("Merge into previous appearance")
+        self.merge_button.clicked.connect(self.merge_previous)
+        controls.addWidget(self.merge_button)
+        controls.addStretch(1)
+        editor_layout.addLayout(controls)
+
+        self.source_label = QLabel()
+        self.source_label.setWordWrap(True)
+        editor_layout.addWidget(self.source_label)
+        editor_layout.addWidget(QLabel("Slide text — material already printed on the slide"))
+        self.slide_text_edit = QTextEdit()
+        self.slide_text_edit.setMinimumHeight(110)
+        editor_layout.addWidget(self.slide_text_edit)
+        editor_layout.addWidget(QLabel("Lecturer discussion — timestamped speech while this slide was displayed"))
+        self.transcript_edit = QTextEdit()
+        self.transcript_edit.setMinimumHeight(170)
+        editor_layout.addWidget(self.transcript_edit)
+        splitter.addWidget(editor)
+        splitter.setStretchFactor(1, 1)
+        root.addWidget(splitter, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save
+        )
+        save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
+        save_button.setText("Approve and create outputs")
+        save_button.setObjectName("primary")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        for position, slide in enumerate(self.slides, 1):
+            slide.setdefault("_include", True)
+            deck = slide.get("deck_slide_number")
+            label = f"Deck slide {deck}" if deck else "Unmatched slide"
+            self.slide_list.addItem(
+                f"{position}. {label} · {format_time(slide['start'])}"
+            )
+        self.slide_list.currentRowChanged.connect(self.load_row)
+        if self.slides:
+            self.slide_list.setCurrentRow(0)
+
+    def _transcript_text(self, slide: dict) -> str:
+        return "\n".join(
+            f"[{format_time(segment['start'])}] {segment['text']}"
+            for segment in slide.get("segments", [])
+        )
+
+    def save_row(self) -> None:
+        if self.current_row < 0 or self.current_row >= len(self.slides):
+            return
+        slide = self.slides[self.current_row]
+        slide["_include"] = self.include_check.isChecked()
+        number = self.deck_number.value()
+        if number:
+            slide["deck_slide_number"] = number
+        else:
+            slide.pop("deck_slide_number", None)
+            slide.pop("deck_image", None)
+        slide["slide_text"] = self.slide_text_edit.toPlainText().strip()
+
+        existing = slide.get("segments", [])
+        by_second = {round(float(segment["start"])): segment for segment in existing}
+        edited: list[dict] = []
+        current: dict | None = None
+        for raw_line in self.transcript_edit.toPlainText().splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            match = re.match(r"^\[(?:(\d+):)?(\d{1,2}):(\d{2})\]\s*(.*)$", line)
+            if match:
+                hours = int(match.group(1) or 0)
+                start = hours * 3600 + int(match.group(2)) * 60 + int(match.group(3))
+                original = copy.deepcopy(by_second.get(start, {}))
+                original.update({
+                    "start": float(start),
+                    "end": float(original.get("end", start + 5)),
+                    "text": match.group(4).strip(),
+                })
+                current = original
+                edited.append(current)
+            elif current is not None:
+                current["text"] = (current["text"] + " " + line).strip()
+        slide["segments"] = edited
+        self._refresh_list_item(self.current_row)
+
+    def _refresh_list_item(self, row: int) -> None:
+        slide = self.slides[row]
+        deck = slide.get("deck_slide_number")
+        label = f"Deck slide {deck}" if deck else "Unmatched slide"
+        included = "" if slide.get("_include", True) else " · EXCLUDED"
+        self.slide_list.item(row).setText(
+            f"{row + 1}. {label} · {format_time(slide['start'])}{included}"
+        )
+
+    def load_row(self, row: int) -> None:
+        if row == self.current_row:
+            return
+        self.save_row()
+        self.current_row = row
+        if row < 0 or row >= len(self.slides):
+            return
+        slide = self.slides[row]
+        self.include_check.setChecked(bool(slide.get("_include", True)))
+        self.deck_number.setValue(int(slide.get("deck_slide_number") or 0))
+        self.slide_text_edit.setPlainText(str(slide.get("slide_text") or ""))
+        self.transcript_edit.setPlainText(self._transcript_text(slide))
+        self.source_label.setText(
+            f"Video appearance {row + 1} · {format_time(slide['start'])}–"
+            f"{format_time(slide['end'])} · text source: {slide.get('text_source', 'not available')}"
+        )
+        image_path = str(slide.get("deck_image") or slide.get("image") or "")
+        pixmap = QPixmap(image_path)
+        if pixmap.isNull():
+            self.preview.setText("Preview unavailable")
+            self.preview.setPixmap(QPixmap())
+        else:
+            self.preview.setPixmap(
+                pixmap.scaled(
+                    760, 360,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        self.merge_button.setEnabled(row > 0)
+
+    def merge_previous(self) -> None:
+        row = self.current_row
+        if row <= 0:
+            return
+        self.save_row()
+        current = self.slides[row]
+        previous = self.slides[row - 1]
+        previous.setdefault("segments", []).extend(current.get("segments", []))
+        previous.setdefault("comments", []).extend(current.get("comments", []))
+        previous["end"] = current["end"]
+        current["segments"] = []
+        current["comments"] = []
+        current["_include"] = False
+        self._refresh_list_item(row)
+        self.slide_list.setCurrentRow(row - 1)
+
+    def reviewed_slides(self) -> list[dict]:
+        self.save_row()
+        kept = [slide for slide in self.slides if slide.get("_include", True)]
+        if not kept:
+            return []
+        all_segments = [segment for slide in self.slides for segment in slide.get("segments", [])]
+        all_comments = [comment for slide in self.slides for comment in slide.get("comments", [])]
+        final_end = max(float(slide["end"]) for slide in self.slides)
+        for index, slide in enumerate(kept):
+            slide.pop("_include", None)
+            slide["index"] = index + 1
+            slide["alignment_start"] = 0.0 if index == 0 else float(slide["start"])
+            slide["end"] = float(kept[index + 1]["start"]) if index + 1 < len(kept) else final_end
+        align_segments(kept, all_segments, all_comments)
+        return kept
+
+    def accept(self) -> None:
+        self.save_row()
+        if not any(slide.get("_include", True) for slide in self.slides):
+            QMessageBox.warning(self, APP_NAME, "Keep at least one slide appearance.")
+            return
+        super().accept()
 
 
 class MainWindow(QMainWindow):
@@ -513,8 +821,8 @@ class MainWindow(QMainWindow):
         title = QLabel(APP_NAME)
         title.setObjectName("headerTitle")
         subtitle = QLabel(
-            f"Version {APP_VERSION} · Turn a lecture video into a timestamped Word transcript "
-            "with its slides and chat comments."
+            f"Version {APP_VERSION} · Align a lecture with its real deck slides, spoken discussion "
+            "and chat—then export Word and Claude-ready notes."
         )
         subtitle.setObjectName("headerSubtitle")
         header_layout.addWidget(title)
@@ -624,6 +932,51 @@ class MainWindow(QMainWindow):
         output_row.addWidget(self.output_edit, 1)
         output_row.addWidget(choose_output)
         details_layout.addLayout(output_row)
+        deck_row = QHBoxLayout()
+        deck_label = self.hint_label("Slide pack")
+        deck_label.setFixedWidth(72)
+        self.deck_edit = DropLineEdit()
+        self.deck_edit.setPlaceholderText("Optional PDF or PowerPoint slide pack")
+        self.deck_edit.file_dropped.connect(self.set_deck)
+        choose_deck = QPushButton("Choose…")
+        choose_deck.clicked.connect(self.browse_deck)
+        clear_deck = QPushButton("Clear")
+        clear_deck.clicked.connect(self.deck_edit.clear)
+        deck_row.addWidget(deck_label)
+        deck_row.addWidget(self.deck_edit, 1)
+        deck_row.addWidget(choose_deck)
+        deck_row.addWidget(clear_deck)
+        details_layout.addLayout(deck_row)
+        details_layout.addWidget(
+            self.hint_label(
+                "Optional but recommended: a PDF provides exact page numbers, native text and clean "
+                "slide images. PowerPoint provides native slide text and numbering; unmatched video "
+                "frames still use local RapidOCR."
+            )
+        )
+        self.whisperx_check = QCheckBox(
+            "Optional enhanced word alignment and anonymous speakers using an external WhisperX environment"
+        )
+        self.whisperx_check.setChecked(False)
+        details_layout.addWidget(self.whisperx_check)
+        whisperx_row = QHBoxLayout()
+        whisperx_label = self.hint_label("WhisperX")
+        whisperx_label.setFixedWidth(72)
+        self.whisperx_edit = QLineEdit(os.environ.get("LECTUREWEAVE_WHISPERX_PYTHON", ""))
+        self.whisperx_edit.setPlaceholderText("Optional Python executable containing WhisperX")
+        choose_whisperx = QPushButton("Choose Python…")
+        choose_whisperx.clicked.connect(self.browse_whisperx)
+        whisperx_row.addWidget(whisperx_label)
+        whisperx_row.addWidget(self.whisperx_edit, 1)
+        whisperx_row.addWidget(choose_whisperx)
+        details_layout.addLayout(whisperx_row)
+        details_layout.addWidget(
+            self.hint_label(
+                "WhisperX is deliberately separate because its PyTorch models are very large. "
+                "Word alignment works without an account; anonymous speaker labels additionally require "
+                "an accepted pyannote model and HF_TOKEN in Windows."
+            )
+        )
         quality_row = QHBoxLayout()
         quality_label = self.hint_label("Accuracy")
         quality_label.setFixedWidth(72)
@@ -672,10 +1025,14 @@ class MainWindow(QMainWindow):
         self.open_button = QPushButton("Open finished document")
         self.open_button.setEnabled(False)
         self.open_button.clicked.connect(self.open_output)
+        self.folder_button = QPushButton("Open output folder")
+        self.folder_button.setEnabled(False)
+        self.folder_button.clicked.connect(self.open_output_folder)
         self.update_button = QPushButton("Check for updates")
         self.update_button.clicked.connect(self.check_for_updates)
         buttons.addWidget(self.start_button)
         buttons.addWidget(self.open_button)
+        buttons.addWidget(self.folder_button)
         buttons.addWidget(self.update_button)
         buttons.addStretch(1)
         action_layout.addLayout(buttons)
@@ -726,6 +1083,35 @@ class MainWindow(QMainWindow):
                 selected += ".docx"
             self.output_edit.setText(selected)
 
+    def browse_deck(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose optional slide pack",
+            "",
+            "Slide packs (*.pdf *.pptx *.pptm);;All files (*.*)",
+        )
+        if selected:
+            self.set_deck(selected)
+
+    def set_deck(self, value: str) -> None:
+        path = Path(value).expanduser().resolve()
+        if path.suffix.lower() not in {".pdf", ".pptx", ".pptm"}:
+            QMessageBox.warning(self, APP_NAME, "Choose a PDF or PowerPoint slide pack.")
+            return
+        self.deck_edit.setText(str(path))
+        self.status.setText("Slide pack selected. It will be matched to the video timeline automatically.")
+
+    def browse_whisperx(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose Python executable containing WhisperX",
+            "",
+            "Python executable (python.exe);;Executables (*.exe);;All files (*.*)",
+        )
+        if selected:
+            self.whisperx_edit.setText(selected)
+            self.whisperx_check.setChecked(True)
+
     def schedule_comment_count(self) -> None:
         self.comment_timer.start(250)
 
@@ -766,13 +1152,23 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
 
+        deck_text = self.deck_edit.text().strip().strip('"')
+        deck_path = Path(deck_text).resolve() if deck_text else None
+        if deck_path and (not deck_path.is_file() or deck_path.suffix.lower() not in {".pdf", ".pptx", ".pptm"}):
+            QMessageBox.critical(self, APP_NAME, "The selected slide pack is not a valid PDF or PowerPoint file.")
+            return
+
         model_name = self.preflight_transcription_model()
         if not model_name:
+            return
+        proceed, whisperx_python = self.preflight_whisperx()
+        if not proceed:
             return
 
         self.log.clear()
         self.start_button.setEnabled(False)
         self.open_button.setEnabled(False)
+        self.folder_button.setEnabled(False)
         self.progress.setRange(0, 0)
         self.status.setText("Starting local processing…")
         self.last_output = None
@@ -785,13 +1181,66 @@ class MainWindow(QMainWindow):
             self.reuse_check.isChecked(),
             self.omit_check.isChecked(),
             model_name,
+            deck_path,
+            whisperx_python,
         )
         self.worker.status.connect(self.status.setText)
         self.worker.progress.connect(self.processing_progress)
         self.worker.log.connect(self.append_log)
+        self.worker.review_requested.connect(self.review_processing)
         self.worker.completed.connect(self.processing_complete)
         self.worker.failed.connect(self.processing_failed)
         self.worker.start()
+
+    def preflight_whisperx(self) -> tuple[bool, Path | None]:
+        if not self.whisperx_check.isChecked():
+            return True, None
+        while True:
+            value = self.whisperx_edit.text().strip().strip('"')
+            python_path = Path(value).resolve() if value else Path()
+            if value and whisperx_environment_ready(python_path):
+                return True, python_path
+
+            prompt = QMessageBox(self)
+            prompt.setWindowTitle(APP_NAME)
+            prompt.setIcon(QMessageBox.Icon.Information)
+            prompt.setText("The optional WhisperX environment is not ready.")
+            prompt.setInformativeText(
+                "LectureWeave+ keeps WhisperX separate so the normal installer does not gain several "
+                "gigabytes of PyTorch dependencies. Choose a Python environment where WhisperX is "
+                "installed, open its setup guide, or continue with LectureWeave+'s built-in word timing."
+            )
+            choose = prompt.addButton("Choose Python environment", QMessageBox.ButtonRole.ActionRole)
+            guide = prompt.addButton("Open WhisperX setup guide", QMessageBox.ButtonRole.HelpRole)
+            standard = prompt.addButton("Continue without WhisperX", QMessageBox.ButtonRole.AcceptRole)
+            cancel = prompt.addButton(QMessageBox.StandardButton.Cancel)
+            prompt.setDefaultButton(choose)
+            prompt.exec()
+            clicked = prompt.clickedButton()
+            if clicked is choose:
+                self.browse_whisperx()
+                continue
+            if clicked is guide:
+                QDesktopServices.openUrl(QUrl(WHISPERX_SETUP_URL))
+                return False, None
+            if clicked is standard:
+                self.whisperx_check.setChecked(False)
+                return True, None
+            if clicked is cancel:
+                return False, None
+            return False, None
+
+    def review_processing(self, slides: list[dict]) -> None:
+        if not self.worker:
+            return
+        dialog = ReviewDialog(slides, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            reviewed = dialog.reviewed_slides()
+            self.status.setText("Review accepted. Creating Word and Claude-ready outputs…")
+            self.worker.apply_review(reviewed)
+        else:
+            self.status.setText("Processing cancelled during review.")
+            self.worker.apply_review(None)
 
     def preflight_transcription_model(self) -> str | None:
         """Resolve model choice while explaining downloads and GPU requirements."""
@@ -901,14 +1350,26 @@ class MainWindow(QMainWindow):
         self.progress.setValue(1)
         self.start_button.setEnabled(True)
         self.open_button.setEnabled(True)
+        self.folder_button.setEnabled(True)
         self.last_output = Path(value)
-        self.status.setText("Finished. The Word document is ready.")
-        QMessageBox.information(self, APP_NAME, f"Finished creating:\n\n{value}")
+        packet = self.last_output.with_suffix("").with_name(
+            self.last_output.with_suffix("").name + " - Claude Packet.zip"
+        )
+        self.status.setText("Finished. Word and Claude-ready outputs are ready.")
+        QMessageBox.information(
+            self,
+            APP_NAME,
+            f"Finished creating:\n\nWord: {value}\n\nClaude packet: {packet}",
+        )
 
     def processing_failed(self, value: str) -> None:
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
         self.start_button.setEnabled(True)
+        if "cancelled during review" in value.lower():
+            self.status.setText("Processing cancelled during review. No outputs were overwritten.")
+            self.append_log(value)
+            return
         self.status.setText("Processing stopped because of an error.")
         self.append_log(value)
         QMessageBox.critical(self, APP_NAME, value)
@@ -916,6 +1377,10 @@ class MainWindow(QMainWindow):
     def open_output(self) -> None:
         if self.last_output and self.last_output.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.last_output)))
+
+    def open_output_folder(self) -> None:
+        if self.last_output:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.last_output.parent)))
 
     def check_for_updates(self) -> None:
         if self.worker and self.worker.isRunning():
@@ -1075,11 +1540,50 @@ def run_model_cache_test() -> int:
         return 10
 
 
+def run_content_feature_test() -> int:
+    """Verify packaged OCR and PDF slide-pack support without network access."""
+    try:
+        import cv2
+        import numpy as np
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            image_path = root / "slide.png"
+            image = np.full((300, 1000, 3), 255, dtype=np.uint8)
+            cv2.putText(
+                image,
+                "International Arbitration Section 18",
+                (20, 170),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.5,
+                (0, 0, 0),
+                3,
+            )
+            cv2.imwrite(str(image_path), image)
+            slides = [{"index": 1, "canonical_index": 1, "image": str(image_path)}]
+            run_slide_ocr(slides)
+            if "Arbitration" not in slides[0].get("slide_text", ""):
+                return 11
+
+            pdf_path = root / "deck.pdf"
+            with Image.open(image_path) as source:
+                source.convert("RGB").save(pdf_path, "PDF")
+            pages = extract_slide_deck(pdf_path, root / "deck-pages")
+            if len(pages) != 1 or not pages[0].image or not Path(pages[0].image).is_file():
+                return 12
+        return 0
+    except Exception:
+        return 13
+
+
 def main() -> None:
     if "--self-test" in sys.argv:
         raise SystemExit(run_self_test())
     if "--model-cache-test" in sys.argv:
         raise SystemExit(run_model_cache_test())
+    if "--content-feature-test" in sys.argv:
+        raise SystemExit(run_content_feature_test())
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)

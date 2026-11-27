@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-#define MyAppVersion "0.2.6"
+#define MyAppVersion "0.3.0"
 #endif
 
 #define MyAppName "LectureWeave+"

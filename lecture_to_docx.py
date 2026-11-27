@@ -13,6 +13,7 @@ import shutil
 import sys
 import time
 from typing import Any, Callable
+import zipfile
 
 ROOT = Path(__file__).resolve().parent
 VENDOR = ROOT / "vendor"
@@ -21,6 +22,16 @@ if VENDOR.exists():
 
 import cv2
 import numpy as np
+from slide_detection import (
+    DetectionConfig,
+    analysis_frame,
+    block_change_ratio,
+    build_activity_mask,
+    choose_change_threshold,
+    hash_distance,
+    hsv_histogram_similarity,
+    perceptual_hash,
+)
 from PIL import Image
 from docx import Document
 from docx.enum.section import WD_SECTION
@@ -168,18 +179,36 @@ def extract_frame(cap: cv2.VideoCapture, seconds: float) -> np.ndarray:
 def detect_slides(
     video_path: Path,
     output_dir: Path,
-    threshold: float = 2.0,
+    threshold: float | None = None,
     minimum_duration: float = 2.5,
     progress_callback: ProgressCallback | None = None,
 ) -> tuple[list[dict[str, Any]], float]:
+    """Detect settled slide appearances with per-video adaptive thresholds."""
     output_dir.mkdir(parents=True, exist_ok=True)
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open {video_path}")
     fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0:
+        raise RuntimeError(f"Could not determine the frame rate of {video_path}")
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = frame_count / fps
     sample_step = max(1, round(fps))
+    config = DetectionConfig()
+
+    # Learn a small moving-region mask from the opening minute.  This rejects
+    # webcam tiles, cursors and animated meeting logos without cropping the slide.
+    calibration_frames: list[np.ndarray] = []
+    for second in range(min(75, max(1, int(duration)))):
+        cap.set(cv2.CAP_PROP_POS_MSEC, second * 1000)
+        ok, frame = cap.read()
+        if not ok:
+            break
+        calibration_frames.append(analysis_frame(frame, config))
+    activity_mask = build_activity_mask(calibration_frames, config)
+    cap.release()
+
+    cap = cv2.VideoCapture(str(video_path))
 
     samples: list[dict[str, Any]] = []
     previous: np.ndarray | None = None
@@ -195,19 +224,21 @@ def detect_slides(
             if not ok:
                 break
             second = frame_index / fps
-            sig = signature(frame)
-            diff = 0.0 if previous is None else signature_difference(previous, sig)
-            if previous is not None and diff >= threshold:
-                candidate_count += 1
+            analysed = analysis_frame(frame, config)
+            ratio = 0.0 if previous is None else block_change_ratio(
+                previous, analysed, config, activity_mask
+            )
             samples.append(
                 {
                     "second": second,
-                    "signature": sig,
-                    "difference": diff,
-                    "brightness": float(np.mean(sig)),
+                    "signature": cv2.cvtColor(analysed, cv2.COLOR_BGR2GRAY),
+                    "phash": perceptual_hash(analysed),
+                    "histogram_frame": cv2.resize(analysed, (96, 54), interpolation=cv2.INTER_AREA),
+                    "ratio": ratio,
+                    "brightness": float(np.mean(analysed)),
                 }
             )
-            previous = sig
+            previous = analysed
             percent = min(100, int(frame_index * 100 / max(1, frame_count)))
             if progress_callback and percent != last_reported_percent:
                 progress_callback(
@@ -215,55 +246,77 @@ def detect_slides(
                     frame_index,
                     frame_count,
                     f"Scanning slides — {format_time(second)} of {format_time(duration)} "
-                    f"({percent}%) · {candidate_count} possible changes",
+                    f"({percent}%) · calibrating changes for this recording",
                 )
                 last_reported_percent = percent
         frame_index += 1
     cap.release()
+    ratios = [float(sample["ratio"]) for sample in samples[1:]]
+    chosen_threshold, threshold_mode = choose_change_threshold(ratios, config)
+    if threshold is not None:
+        chosen_threshold = threshold
+        threshold_mode = "manual"
+    candidate_count = sum(sample["ratio"] >= chosen_threshold for sample in samples[1:])
     if progress_callback:
         progress_callback(
             "slide_scan",
             frame_count,
             frame_count,
-            f"Slide scan complete — reviewing {candidate_count} possible changes…",
+            f"Slide scan complete — reviewing {candidate_count} possible changes "
+            f"with {threshold_mode} calibration…",
         )
 
-    boundaries = [0.0]
-    boundaries.extend(sample["second"] for sample in samples[1:] if sample["difference"] >= threshold)
-    boundaries.append(duration)
-    boundaries = sorted(set(round(x, 3) for x in boundaries))
-
-    sample_by_second = {round(sample["second"]): sample for sample in samples}
-    provisional: list[dict[str, Any]] = []
-    for start, end in zip(boundaries, boundaries[1:]):
-        if end - start < minimum_duration:
-            continue
-        # The sample video uses a horizontal PowerPoint transition. Capturing at
-        # the next whole second consistently lands on the settled slide, whereas
-        # fractional seeking can decode a transition frame from the preceding GOP.
-        capture_time = min(end - 0.25, start + min(1.0, (end - start) / 2))
-        nearest = sample_by_second.get(round(capture_time))
-        if nearest is None:
-            nearest = min(samples, key=lambda item: abs(item["second"] - capture_time))
-        if nearest["brightness"] < 15:
-            continue
-        provisional.append(
+    # A threshold crossing is only accepted after the image settles.  The
+    # boundary remains at the beginning of the change, while capture happens
+    # inside the stable dwell so transition frames are not exported.
+    stable_threshold = max(config.minimum_threshold / 2, chosen_threshold * config.stable_fraction)
+    merged: list[dict[str, Any]] = []
+    if samples:
+        first = samples[0]
+        merged.append(
             {
-                "start": float(start),
-                "source_end": float(end),
-                "capture_time": float(capture_time),
-                "signature": nearest["signature"],
+                "start": 0.0,
+                "capture_time": float(first["second"]),
+                **{key: first[key] for key in ("signature", "phash", "histogram_frame", "brightness")},
             }
         )
-
-    # Merge adjacent duplicate states, which removes brief transition artifacts and
-    # animated redraws that resolve to the same final slide.
-    merged: list[dict[str, Any]] = []
-    for item in provisional:
-        if merged and signature_difference(merged[-1]["signature"], item["signature"]) < 1.0:
-            merged[-1]["source_end"] = item["source_end"]
+    index = 1
+    while index < len(samples):
+        candidate = samples[index]
+        if candidate["ratio"] < chosen_threshold:
+            index += 1
             continue
-        merged.append(item)
+        boundary = float(candidate["second"])
+        settled_index: int | None = None
+        for lookahead in range(index + 1, min(len(samples), index + 5)):
+            if samples[lookahead]["ratio"] <= stable_threshold:
+                settled_index = lookahead
+                break
+        if settled_index is None:
+            index += 1
+            continue
+        settled = samples[settled_index]
+        previous_slide = merged[-1]
+        votes = (
+            signature_difference(previous_slide["signature"], settled["signature"]) >= 1.0,
+            hash_distance(previous_slide["phash"], settled["phash"]) > config.duplicate_hash_distance,
+            hsv_histogram_similarity(
+                previous_slide["histogram_frame"], settled["histogram_frame"]
+            ) < 0.985,
+        )
+        if sum(bool(vote) for vote in votes) >= 2 and settled["brightness"] >= 15:
+            if boundary - float(previous_slide["start"]) >= minimum_duration:
+                merged.append(
+                    {
+                        "start": boundary,
+                        "capture_time": float(settled["second"]),
+                        **{
+                            key: settled[key]
+                            for key in ("signature", "phash", "histogram_frame", "brightness")
+                        },
+                    }
+                )
+        index = settled_index + 1
 
     if not merged:
         raise RuntimeError("No stable slides were detected")
@@ -274,8 +327,29 @@ def detect_slides(
     for item in merged[1:]:
         item["alignment_start"] = item["start"]
 
+    # Assign a canonical identity globally.  A lecturer returning to an earlier
+    # slide remains a new timeline appearance but reuses the original image.
+    canonicals: list[dict[str, Any]] = []
+    for item in merged:
+        canonical_index: int | None = None
+        for prior in canonicals:
+            if (
+                hash_distance(item["phash"], prior["phash"]) <= config.duplicate_hash_distance
+                and signature_difference(item["signature"], prior["signature"]) <= 0.75
+                and hsv_histogram_similarity(
+                    item["histogram_frame"], prior["histogram_frame"]
+                ) >= 0.985
+            ):
+                canonical_index = int(prior["canonical_index"])
+                break
+        if canonical_index is None:
+            canonical_index = len(canonicals) + 1
+            canonicals.append({**item, "canonical_index": canonical_index})
+        item["canonical_index"] = canonical_index
+
     cap = cv2.VideoCapture(str(video_path))
     manifest: list[dict[str, Any]] = []
+    canonical_images: dict[int, str] = {}
     for capture_index, item in enumerate(merged, 1):
         if progress_callback:
             progress_callback(
@@ -284,10 +358,15 @@ def detect_slides(
                 len(merged),
                 f"Saving clean slide images — {capture_index} of {len(merged)}",
             )
-        frame = crop_pillarbox(extract_frame(cap, item["capture_time"]))
-        image_name = f"slide_{item['index']:03d}_{int(item['start']):06d}.jpg"
-        image_path = output_dir / image_name
-        cv2.imwrite(str(image_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        canonical_index = int(item["canonical_index"])
+        if canonical_index in canonical_images:
+            image_path = Path(canonical_images[canonical_index])
+        else:
+            frame = crop_pillarbox(extract_frame(cap, item["capture_time"]))
+            image_name = f"slide_{item['index']:03d}_{int(item['start']):06d}.jpg"
+            image_path = output_dir / image_name
+            cv2.imwrite(str(image_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            canonical_images[canonical_index] = str(image_path)
         manifest.append(
             {
                 "index": item["index"],
@@ -296,6 +375,7 @@ def detect_slides(
                 "end": item["end"],
                 "capture_time": item["capture_time"],
                 "image": str(image_path),
+                "canonical_index": canonical_index,
             }
         )
     cap.release()
@@ -307,6 +387,18 @@ def detect_slides(
             f"Detected {len(merged)} stable slide appearances.",
         )
     (output_dir / "slides.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    diagnostics = {
+        "algorithm": "adaptive-block-ensemble-v1",
+        "threshold": chosen_threshold,
+        "threshold_mode": threshold_mode,
+        "activity_mask_fraction": float(np.mean(activity_mask)) if activity_mask is not None else 0.0,
+        "candidate_changes": candidate_count,
+        "accepted_appearances": len(manifest),
+        "canonical_slides": len(canonical_images),
+    }
+    (output_dir / "transition_detection.json").write_text(
+        json.dumps(diagnostics, indent=2), encoding="utf-8"
+    )
     return manifest, duration
 
 
@@ -520,6 +612,7 @@ def transcribe(
     model_name: str,
     model_cache: Path | None = None,
     progress_callback: ProgressCallback | None = None,
+    hotwords: str = "",
 ) -> tuple[list[dict[str, Any]], str]:
     # PyAV 19 removed the ``metadata_errors`` keyword while some Faster Whisper
     # releases still pass it.  Keep the tool usable with either PyAV API.
@@ -570,6 +663,8 @@ def transcribe(
                 vad_filter=True,
                 condition_on_previous_text=True,
                 initial_prompt=initial_prompt,
+                hotwords=hotwords or None,
+                word_timestamps=True,
             )
             if progress_callback:
                 progress_callback(
@@ -584,11 +679,24 @@ def transcribe(
             for segment in iterator:
                 if not segment.text.strip():
                     continue
-                segments.append({
+                segment_data = {
                     "start": float(segment.start),
                     "end": float(segment.end),
                     "text": re.sub(r"\s+", " ", segment.text).strip(),
-                })
+                    "avg_logprob": float(segment.avg_logprob),
+                    "compression_ratio": float(segment.compression_ratio),
+                    "no_speech_prob": float(segment.no_speech_prob),
+                    "words": [
+                        {
+                            "start": float(word.start),
+                            "end": float(word.end),
+                            "word": word.word,
+                            "probability": float(word.probability),
+                        }
+                        for word in (segment.words or [])
+                    ],
+                }
+                segments.append(segment_data)
                 now = time.monotonic()
                 if progress_callback and (now - last_reported >= 0.5 or segment.end >= info.duration):
                     processed = min(float(segment.end), float(info.duration))
@@ -641,6 +749,138 @@ def write_transcript_files(segments: list[dict[str, Any]], output_dir: Path) -> 
                 f"{index}\n{format_time(segment['start'], True)} --> "
                 f"{format_time(segment['end'], True)}\n{segment['text']}\n\n"
             )
+
+
+def write_claude_packet(
+    video_path: Path,
+    slides: list[dict[str, Any]],
+    duration: float,
+    output_path: Path,
+    title_text: str,
+    model_name: str,
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, str]:
+    """Write explicit slide-text/discussion artifacts for downstream note generation."""
+    stem = output_path.with_suffix("")
+    markdown_path = stem.with_name(stem.name + " - Claude Notes.md")
+    project_path = stem.with_name(stem.name + " - Project.json")
+    packet_path = stem.with_name(stem.name + " - Claude Packet.zip")
+    assets_dir = stem.with_name(stem.name + " - Claude Assets")
+    slide_assets_dir = assets_dir / "slides"
+    slide_assets_dir.mkdir(parents=True, exist_ok=True)
+
+    lines = [
+        f"# {title_text}",
+        "",
+        "> This file deliberately separates the words printed on each slide from the lecturer's spoken discussion. ",
+        "> When making notes, treat **Slide text** as source material already visible to students and ",
+        "> **Lecturer discussion** as explanation, examples, qualifications, and additional information given while that slide was displayed.",
+        "",
+        f"- Source video: `{video_path.name}`",
+        f"- Duration: {format_time(duration)}",
+        f"- Transcription model: {model_name}",
+        f"- Video slide appearances: {len(slides)}",
+        "",
+    ]
+    project_slides: list[dict[str, Any]] = []
+    image_entries: list[tuple[Path, str]] = []
+    for position, slide in enumerate(slides, 1):
+        if progress_callback:
+            progress_callback(
+                "claude_export", position - 1, len(slides),
+                f"Building Claude-ready packet — slide appearance {position} of {len(slides)}",
+            )
+        deck_number = slide.get("deck_slide_number")
+        identity = f"Deck slide {deck_number}" if deck_number else "Unmatched captured slide"
+        heading = f"{identity} — video appearance {position} — {format_time(slide['start'])}"
+        image_source = Path(slide.get("deck_image") or slide["image"])
+        safe_identity = f"deck-{int(deck_number):03d}" if deck_number else "unmatched"
+        extension = image_source.suffix.lower() or ".png"
+        image_filename = f"{safe_identity}-appearance-{position:03d}{extension}"
+        archive_image = f"{assets_dir.name}/slides/{image_filename}"
+        image_entries.append((image_source, archive_image))
+        local_image = slide_assets_dir / image_filename
+        if image_source.is_file() and not local_image.exists():
+            shutil.copy2(image_source, local_image)
+        lines.extend([
+            f"## {heading}",
+            "",
+            f"- Deck slide number: {deck_number if deck_number else 'not confidently matched'}",
+            f"- Video appearance number: {position}",
+            f"- Displayed: {format_time(slide['start'])}–{format_time(slide['end'])}",
+            f"- Slide-text source: {slide.get('text_source', 'not available')}",
+            "",
+            f"![{heading}]({archive_image})",
+            "",
+            "### Slide text (material already displayed on the slide)",
+            "",
+            str(slide.get("slide_text") or "No reliable slide text was extracted."),
+            "",
+            "### Lecturer discussion while this slide was displayed",
+            "",
+        ])
+        segments = slide.get("segments", [])
+        if segments:
+            lines.extend(
+                f"[{format_time(segment['start'])}] "
+                f"{(str(segment.get('speaker')) + ': ') if segment.get('speaker') else ''}"
+                f"{segment['text']}"
+                for segment in segments
+            )
+        else:
+            lines.append("No speech was detected during this appearance.")
+        lines.extend(["", "### Chat comments during this slide", ""])
+        comments = slide.get("comments", [])
+        if comments:
+            lines.extend(
+                f"- [{format_time(comment['start'])}] **{comment['author']}:** {comment['text']}"
+                for comment in comments
+            )
+        else:
+            lines.append("No timestamped chat comments.")
+        lines.extend(["", "---", ""])
+        project_slides.append({
+            "deck_slide_number": deck_number,
+            "video_appearance_number": position,
+            "canonical_video_slide": slide.get("canonical_index"),
+            "start": slide["start"],
+            "end": slide["end"],
+            "image": archive_image,
+            "slide_text": slide.get("slide_text", ""),
+            "slide_text_source": slide.get("text_source", ""),
+            "lecturer_discussion": segments,
+            "chat_comments": comments,
+        })
+
+    markdown_text = "\n".join(lines)
+    markdown_path.write_text(markdown_text, encoding="utf-8")
+    project = {
+        "schema": "lectureweave-project-v1",
+        "title": title_text,
+        "source_video": video_path.name,
+        "duration_seconds": duration,
+        "transcription_model": model_name,
+        "slides": project_slides,
+    }
+    project_path.write_text(json.dumps(project, indent=2, ensure_ascii=False), encoding="utf-8")
+    with zipfile.ZipFile(packet_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(markdown_path.name, markdown_text)
+        archive.writestr(project_path.name, json.dumps(project, indent=2, ensure_ascii=False))
+        included: set[str] = set()
+        for source, archive_name in image_entries:
+            if archive_name in included or not source.is_file():
+                continue
+            archive.write(source, archive_name)
+            included.add(archive_name)
+    if progress_callback:
+        progress_callback(
+            "claude_export", len(slides), len(slides), "Claude-ready Markdown, JSON and ZIP created."
+        )
+    return {
+        "markdown": str(markdown_path),
+        "project": str(project_path),
+        "packet": str(packet_path),
+    }
 
 
 def align_segments(
@@ -759,6 +999,7 @@ def timeline_events(
             current is None
             or (previous_end is not None and item["start"] - previous_end > 2.5)
             or len(current["text"]) >= 900
+            or (current is not None and current.get("speaker") != item.get("speaker"))
         )
         if should_break:
             flush_current()
@@ -767,6 +1008,7 @@ def timeline_events(
                 "start": item["start"],
                 "end": item["end"],
                 "text": item["text"],
+                "speaker": item.get("speaker"),
             }
         else:
             current["text"] += " " + item["text"]
@@ -921,13 +1163,24 @@ def build_docx(
             )
         document.add_page_break()
         heading = document.add_paragraph(style="Heading 1")
-        heading.add_run(f"Slide {slide_position + 1}  {format_time(slide['start'])}")
+        deck_number = slide.get("deck_slide_number")
+        if deck_number:
+            heading.add_run(
+                f"Deck slide {deck_number} · video appearance {slide_position + 1}  "
+                f"{format_time(slide['start'])}"
+            )
+        else:
+            heading.add_run(
+                f"Unmatched slide · video appearance {slide_position + 1}  "
+                f"{format_time(slide['start'])}"
+            )
 
         picture_paragraph = document.add_paragraph()
         picture_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
         picture_paragraph.paragraph_format.space_after = Pt(4)
         picture_paragraph.paragraph_format.keep_with_next = True
-        inline_shape = picture_paragraph.add_run().add_picture(slide["image"], width=Inches(6.35))
+        display_image = slide.get("deck_image") or slide["image"]
+        inline_shape = picture_paragraph.add_run().add_picture(display_image, width=Inches(6.35))
         set_image_alt_text(
             inline_shape,
             f"Slide {slide_position + 1}",
@@ -944,7 +1197,23 @@ def build_docx(
         caption_run.italic = True
         caption_run.font.size = Pt(9)
 
-        document.add_paragraph("Transcript", style="Transcript Label")
+        document.add_paragraph(
+            "Slide text (already displayed on the slide)", style="Transcript Label"
+        )
+        slide_text = document.add_paragraph()
+        if slide.get("slide_text"):
+            slide_text.add_run(str(slide["slide_text"]))
+        else:
+            missing_text = slide_text.add_run("No reliable slide text was extracted.")
+            missing_text.italic = True
+        source = document.add_paragraph()
+        source_run = source.add_run(f"Text source: {slide.get('text_source', 'not available')}")
+        source_run.italic = True
+        source_run.font.size = Pt(8.5)
+
+        document.add_paragraph(
+            "Lecturer discussion while this slide was displayed", style="Transcript Label"
+        )
         segments = slide.get("segments", [])
         comments = slide.get("comments", [])
         if not segments and not comments:
@@ -960,6 +1229,9 @@ def build_docx(
             paragraph = document.add_paragraph()
             timestamp_run = paragraph.add_run(f"[{format_time(event['start'])}] ")
             timestamp_run.bold = True
+            if event.get("speaker"):
+                speaker_run = paragraph.add_run(f"{event['speaker']}: ")
+                speaker_run.bold = True
             paragraph.add_run(event["text"])
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -985,7 +1257,12 @@ def main() -> None:
         "--title",
         help="Document title (defaults to '<video filename> Transcript and Slides').",
     )
-    parser.add_argument("--slide-threshold", type=float, default=2.0)
+    parser.add_argument(
+        "--slide-threshold",
+        type=float,
+        default=None,
+        help="Optional manual block-change ratio; omitted uses per-video calibration.",
+    )
     parser.add_argument("--minimum-slide-duration", type=float, default=2.5)
     parser.add_argument("--slides-only", action="store_true")
     parser.add_argument("--reuse-transcript", action="store_true")

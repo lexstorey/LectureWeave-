@@ -13,10 +13,17 @@ machine-generated transcript text and optional chat comments.
 ## Current capabilities
 
 - Drag-and-drop local lecture videos
+- Optional PDF or PowerPoint slide packs with real deck slide numbering
 - Local transcription with a maximum-accuracy Large-v3 mode and a faster Turbo mode
-- Stable slide detection and brief-transition filtering
+- Adaptive multi-signal slide detection, moving-region masking and stable-frame confirmation
+- Global repeated-slide recognition without losing later timeline appearances
+- Local RapidOCR slide text extraction when no original deck is available
+- Slide-derived terminology supplied to Whisper for names and specialist vocabulary
 - Timestamped Blackboard-style chat comment import
-- Word document generation with slide images and aligned transcript text
+- Review screen for correcting deck numbers, slide text and transcript before export
+- Word document generation that separates slide text from the lecturer's discussion
+- Claude-ready Markdown, structured JSON, slide assets and a self-contained ZIP packet
+- Optional external WhisperX word alignment and anonymous speaker labels
 - Cached transcripts for faster regeneration
 - CPU fallback and NVIDIA CUDA acceleration when available
 - Live slide-scan, model-download, transcription and export progress with ETA

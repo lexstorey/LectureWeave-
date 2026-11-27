@@ -69,8 +69,71 @@ https://github.com/microsoft/onnxruntime
 MIT License
 Runtime dependency used by local speech-processing components.
 
-No source code from the improvement candidates listed in ROADMAP.md has yet
-been incorporated. When code is adapted, this file must be updated with the
-upstream repository, exact commit, copyright notice, licence, affected local
-files and a description of the modifications.
+RapidOCR and PP-OCR model files
+https://github.com/RapidAI/RapidOCR
+Apache License 2.0
+Copyright RapidOCR Authors; model files are derived from PaddleOCR models,
+Copyright Baidu and respective PaddleOCR rights holders.
+Local OCR of captured slides. See RapidOCR MODEL_LICENSES.md for model-specific
+sources, hashes and conversion records.
+
+RapidFuzz
+https://github.com/rapidfuzz/RapidFuzz
+MIT License
+Confidence-scored matching between video OCR and native slide-pack text.
+
+pypdfium2 and PDFium
+https://github.com/pypdfium2-team/pypdfium2
+Apache License 2.0 / BSD 3-Clause and bundled PDFium dependency licences
+Rendering and native-text extraction from optional PDF slide packs. The wheel's
+BUILD_LICENSES files must remain included in binary distributions.
+
+WhisperX (optional external interoperability)
+https://github.com/m-bain/whisperX
+BSD 2-Clause License
+LectureWeave+ does not bundle WhisperX, PyTorch or pyannote models. It can call
+a separately installed environment for word alignment and anonymous speaker
+labels. Model licences and Hugging Face acceptance terms remain separate.
+
+Adapted slide-detection concepts
+=================================
+
+video-slide-extractor
+https://github.com/itsyujay/video-slide-extractor
+Reviewed commit: 221454d1cc296e75a2ddf83cd3ed587d5922c232
+MIT License, Copyright (c) 2026 Video2Any
+
+LectureWeave+ slide_detection.py independently translates and modifies the
+upstream block-change ratio, activity-mask, footage calibration and settled
+dwell concepts for NumPy/OpenCV and the LectureWeave+ timeline data model.
+
+LectureLens
+https://github.com/aggarwal-shiv/LectureLens
+Reviewed commit: 05b69841bde1555f516892403052ec57ddcaa5e4
+MIT License, Copyright (c) 2025 Shivam Aggarwal
+
+LectureWeave+ slide_detection.py independently adapts the upstream multi-signal
+confirmation and perceptual deduplication concepts. Repeated slides remain
+separate timeline appearances rather than being deleted.
+
+MIT License text applying to both adapted projects above
+---------------------------------------------------------
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
