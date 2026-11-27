@@ -66,6 +66,7 @@ def enhance_with_whisperx(
     work_dir: Path,
     python_executable: Path,
     progress_callback: ProgressCallback | None = None,
+    hf_token: str | None = None,
 ) -> list[dict[str, Any]]:
     """Force-align existing text and optionally assign anonymous speakers."""
     helper = work_dir / "whisperx_helper.py"
@@ -84,14 +85,20 @@ def enhance_with_whisperx(
     )
     if progress_callback:
         detail = "Aligning words with WhisperX"
-        if os.environ.get("HF_TOKEN"):
+        if hf_token:
             detail += " and detecting anonymous speakers"
         progress_callback("whisperx", 0, 0, detail + "…")
+    child_environment = os.environ.copy()
+    if hf_token:
+        child_environment["HF_TOKEN"] = hf_token
+    else:
+        child_environment.pop("HF_TOKEN", None)
     result = subprocess.run(
         [str(python_executable), str(helper), str(request), str(output)],
         capture_output=True,
         text=True,
         timeout=7200,
+        env=child_environment,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if result.returncode != 0 or not output.is_file():

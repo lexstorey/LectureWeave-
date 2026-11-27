@@ -49,6 +49,11 @@ from content_enrichment import (
     run_slide_ocr,
     transcription_vocabulary,
 )
+from credential_store import (
+    delete_huggingface_token,
+    load_huggingface_token,
+    save_huggingface_token,
+)
 from whisperx_bridge import enhance_with_whisperx, whisperx_environment_ready
 
 from lecture_to_docx import (
@@ -67,7 +72,7 @@ from lecture_to_docx import (
 
 
 APP_NAME = "LectureWeave+"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 REPOSITORY_URL = "https://github.com/lexstorey/LectureWeave-"
 PURPLE = "#4A148C"
 PURPLE_DARK = "#32105D"
@@ -333,6 +338,7 @@ class ProcessingThread(QThread):
         model_name: str,
         deck_path: Path | None,
         whisperx_python: Path | None,
+        hf_token: str | None,
     ) -> None:
         super().__init__()
         self.video = video
@@ -344,6 +350,7 @@ class ProcessingThread(QThread):
         self.model_name = model_name
         self.deck_path = deck_path
         self.whisperx_python = whisperx_python
+        self.hf_token = hf_token
         self.review_event = threading.Event()
         self.reviewed_slides: list[dict] | None = None
 
@@ -442,7 +449,12 @@ class ProcessingThread(QThread):
                     print(f"Transcribed {len(segments)} timestamped speech segments")
 
                 if self.whisperx_python:
-                    aligned_cache = transcript_dir / "whisperx-aligned.json"
+                    cache_name = (
+                        "whisperx-aligned-speakers.json"
+                        if self.hf_token
+                        else "whisperx-aligned.json"
+                    )
+                    aligned_cache = transcript_dir / cache_name
                     if self.reuse_transcript and aligned_cache.is_file():
                         segments = json.loads(aligned_cache.read_text(encoding="utf-8"))
                         print("Loaded cached WhisperX word alignment")
@@ -453,6 +465,7 @@ class ProcessingThread(QThread):
                             transcript_dir,
                             self.whisperx_python,
                             self.report_progress,
+                            self.hf_token,
                         )
                         aligned_cache.write_text(
                             json.dumps(segments, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -970,11 +983,30 @@ class MainWindow(QMainWindow):
         whisperx_row.addWidget(self.whisperx_edit, 1)
         whisperx_row.addWidget(choose_whisperx)
         details_layout.addLayout(whisperx_row)
+        token_row = QHBoxLayout()
+        token_label = self.hint_label("HF token")
+        token_label.setFixedWidth(72)
+        self.hf_token_edit = QLineEdit()
+        self.hf_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.hf_token_edit.setPlaceholderText("Paste a Hugging Face read token beginning with hf_")
+        save_token = QPushButton("Save token")
+        save_token.clicked.connect(self.save_hf_token)
+        remove_token = QPushButton("Remove")
+        remove_token.clicked.connect(self.remove_hf_token)
+        token_row.addWidget(token_label)
+        token_row.addWidget(self.hf_token_edit, 1)
+        token_row.addWidget(save_token)
+        token_row.addWidget(remove_token)
+        details_layout.addLayout(token_row)
+        self.hf_token_status = self.hint_label("")
+        details_layout.addWidget(self.hf_token_status)
+        self.refresh_hf_token_status()
         details_layout.addWidget(
             self.hint_label(
                 "WhisperX is deliberately separate because its PyTorch models are very large. "
                 "Word alignment works without an account; anonymous speaker labels additionally require "
-                "an accepted pyannote model and HF_TOKEN in Windows."
+                "an accepted pyannote model and a saved Hugging Face read token. The token is stored "
+                "securely in Windows Credential Manager."
             )
         )
         quality_row = QHBoxLayout()
@@ -1112,6 +1144,44 @@ class MainWindow(QMainWindow):
             self.whisperx_edit.setText(selected)
             self.whisperx_check.setChecked(True)
 
+    def refresh_hf_token_status(self) -> None:
+        try:
+            saved = bool(load_huggingface_token())
+        except OSError:
+            saved = False
+        self.hf_token_status.setText(
+            "Hugging Face token is saved and will be reused automatically."
+            if saved
+            else "No Hugging Face token saved. Word alignment still works; speaker labels require one."
+        )
+
+    def save_hf_token(self) -> None:
+        token = self.hf_token_edit.text().strip()
+        try:
+            save_huggingface_token(token)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(self, APP_NAME, f"The token could not be saved: {exc}")
+            return
+        self.hf_token_edit.clear()
+        self.refresh_hf_token_status()
+        QMessageBox.information(
+            self,
+            APP_NAME,
+            "The Hugging Face token was saved securely in Windows Credential Manager. "
+            "You will not need to enter it again.",
+        )
+
+    def remove_hf_token(self) -> None:
+        try:
+            removed = delete_huggingface_token()
+        except OSError as exc:
+            QMessageBox.critical(self, APP_NAME, f"The saved token could not be removed: {exc}")
+            return
+        self.hf_token_edit.clear()
+        self.refresh_hf_token_status()
+        if removed:
+            QMessageBox.information(self, APP_NAME, "The saved Hugging Face token was removed.")
+
     def schedule_comment_count(self) -> None:
         self.comment_timer.start(250)
 
@@ -1164,6 +1234,11 @@ class MainWindow(QMainWindow):
         proceed, whisperx_python = self.preflight_whisperx()
         if not proceed:
             return
+        try:
+            hf_token = load_huggingface_token() or None
+        except OSError as exc:
+            QMessageBox.critical(self, APP_NAME, f"The saved Hugging Face token could not be read: {exc}")
+            return
 
         self.log.clear()
         self.start_button.setEnabled(False)
@@ -1183,6 +1258,7 @@ class MainWindow(QMainWindow):
             model_name,
             deck_path,
             whisperx_python,
+            hf_token,
         )
         self.worker.status.connect(self.status.setText)
         self.worker.progress.connect(self.processing_progress)
