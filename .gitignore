@@ -1,0 +1,46 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build_env/
+vendor/
+
+# Packaged applications and build intermediates
+build/
+build_cx/
+dist/
+zip_test_*/
+*.exe
+*.msi
+*.zip
+
+# Models, job caches and generated media
+run/
+models/
+rendered*/
+page_sheets*/
+comment_test_render/
+inspection/
+icon_review/
+icu-quarantine/
+libreoffice-installer/
+libreoffice-portable/
+
+# Generated documents and recordings
+*.docx
+*.pdf
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.wav
+*.mp3
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+

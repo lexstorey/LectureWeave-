@@ -1,0 +1,740 @@
+from __future__ import annotations
+
+import argparse
+import html
+import json
+import math
+import os
+from pathlib import Path
+import re
+import sys
+from typing import Any
+
+ROOT = Path(__file__).resolve().parent
+VENDOR = ROOT / "vendor"
+if VENDOR.exists():
+    sys.path.insert(0, str(VENDOR))
+
+import cv2
+import numpy as np
+from PIL import Image
+from docx import Document
+from docx.enum.section import WD_SECTION
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.style import WD_STYLE_TYPE
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Inches, Pt, RGBColor
+
+
+LEGAL_PROMPT = (
+    "Australian law university lecture. Terminology may include court based ADR, "
+    "alternative dispute resolution, mediation, conciliation, arbitration, NT Local Court, "
+    "Northern Territory Civil and Administrative Tribunal, NTCAT, Legal Profession Act, "
+    "Anti-Discrimination Act, Health and Community Services Complaints Act, Work Health and "
+    "Safety Act, Burial and Cremation Act, interlocutory, jurisdiction, legislation, statute, "
+    "tribunal, registrar, mediator and conciliator."
+)
+
+
+def format_time(seconds: float, include_ms: bool = False) -> str:
+    seconds = max(0.0, float(seconds))
+    whole = int(seconds)
+    hours, remainder = divmod(whole, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if include_ms:
+        milliseconds = int(round((seconds - whole) * 1000))
+        if milliseconds == 1000:
+            whole += 1
+            milliseconds = 0
+            hours, remainder = divmod(whole, 3600)
+            minutes, secs = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def parse_chat_timestamp(value: str) -> float:
+    parts = value.strip().split(":")
+    if len(parts) == 2:
+        minutes, seconds = parts
+        hours = "0"
+    elif len(parts) == 3:
+        hours, minutes, seconds = parts
+    else:
+        raise ValueError(f"Unsupported chat timestamp: {value}")
+    if not all(part.isdigit() for part in (hours, minutes, seconds)):
+        raise ValueError(f"Unsupported chat timestamp: {value}")
+    if int(seconds) >= 60 or (len(parts) == 3 and int(minutes) >= 60):
+        raise ValueError(f"Unsupported chat timestamp: {value}")
+    return int(hours) * 3600 + int(minutes) * 60 + int(seconds)
+
+
+def clean_chat_markup(value: str) -> str:
+    value = html.unescape(value).replace("\u00a0", " ").strip()
+    value = re.sub(r"^[-*]\s+", "", value)
+    value = re.sub(r"^\*\*(.*?)\*\*$", r"\1", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def parse_chat_comments(text: str) -> list[dict[str, Any]]:
+    """Parse Blackboard-style copied chat Markdown into timestamped comments."""
+    normalized = html.unescape(text).replace("\r\n", "\n").replace("\r", "\n")
+    blocks = re.split(r"(?m)^\s*-\s+", normalized)
+    comments: list[dict[str, Any]] = []
+    time_pattern = re.compile(r"^\*{0,2}(\d{1,3}:\d{2}(?::\d{2})?)\*{0,2}$")
+    for block in blocks[1:]:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if len(lines) < 3:
+            continue
+        author = clean_chat_markup(lines[0])
+        timestamp_index = None
+        timestamp_text = None
+        for index, line in enumerate(lines[1:], 1):
+            match = time_pattern.fullmatch(line)
+            if match:
+                timestamp_index = index
+                timestamp_text = match.group(1)
+                break
+        if timestamp_index is None or timestamp_text is None:
+            continue
+        message = clean_chat_markup(" ".join(lines[timestamp_index + 1:]))
+        if not author or not message:
+            continue
+        comments.append(
+            {
+                "author": author,
+                "timestamp": timestamp_text,
+                "start": parse_chat_timestamp(timestamp_text),
+                "text": message,
+            }
+        )
+    comments.sort(key=lambda item: item["start"])
+    return comments
+
+
+def signature(frame: np.ndarray) -> np.ndarray:
+    height, width = frame.shape[:2]
+    crop = frame[:, int(width * 0.055):int(width * 0.945)]
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    gray = cv2.resize(gray, (228, 144), interpolation=cv2.INTER_AREA)
+    return cv2.GaussianBlur(gray, (5, 5), 0)
+
+
+def signature_difference(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.mean(cv2.absdiff(a, b)))
+
+
+def crop_pillarbox(frame: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    column_mean = np.mean(gray, axis=0)
+    candidates = np.flatnonzero(column_mean > 10)
+    if candidates.size:
+        left = max(0, int(candidates[0]) - 2)
+        right = min(frame.shape[1], int(candidates[-1]) + 3)
+        if right - left >= frame.shape[1] * 0.6:
+            return frame[:, left:right]
+    return frame
+
+
+def extract_frame(cap: cv2.VideoCapture, seconds: float) -> np.ndarray:
+    cap.set(cv2.CAP_PROP_POS_MSEC, seconds * 1000)
+    ok, frame = cap.read()
+    if not ok:
+        raise RuntimeError(f"Could not decode video frame at {format_time(seconds)}")
+    return frame
+
+
+def detect_slides(
+    video_path: Path,
+    output_dir: Path,
+    threshold: float = 2.0,
+    minimum_duration: float = 2.5,
+) -> tuple[list[dict[str, Any]], float]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open {video_path}")
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    duration = frame_count / fps
+    sample_step = max(1, round(fps))
+
+    samples: list[dict[str, Any]] = []
+    previous: np.ndarray | None = None
+    frame_index = 0
+    while True:
+        ok = cap.grab()
+        if not ok:
+            break
+        if frame_index % sample_step == 0:
+            ok, frame = cap.retrieve()
+            if not ok:
+                break
+            second = frame_index / fps
+            sig = signature(frame)
+            diff = 0.0 if previous is None else signature_difference(previous, sig)
+            samples.append(
+                {
+                    "second": second,
+                    "signature": sig,
+                    "difference": diff,
+                    "brightness": float(np.mean(sig)),
+                }
+            )
+            previous = sig
+        frame_index += 1
+    cap.release()
+
+    boundaries = [0.0]
+    boundaries.extend(sample["second"] for sample in samples[1:] if sample["difference"] >= threshold)
+    boundaries.append(duration)
+    boundaries = sorted(set(round(x, 3) for x in boundaries))
+
+    sample_by_second = {round(sample["second"]): sample for sample in samples}
+    provisional: list[dict[str, Any]] = []
+    for start, end in zip(boundaries, boundaries[1:]):
+        if end - start < minimum_duration:
+            continue
+        # The sample video uses a horizontal PowerPoint transition. Capturing at
+        # the next whole second consistently lands on the settled slide, whereas
+        # fractional seeking can decode a transition frame from the preceding GOP.
+        capture_time = min(end - 0.25, start + min(1.0, (end - start) / 2))
+        nearest = sample_by_second.get(round(capture_time))
+        if nearest is None:
+            nearest = min(samples, key=lambda item: abs(item["second"] - capture_time))
+        if nearest["brightness"] < 15:
+            continue
+        provisional.append(
+            {
+                "start": float(start),
+                "source_end": float(end),
+                "capture_time": float(capture_time),
+                "signature": nearest["signature"],
+            }
+        )
+
+    # Merge adjacent duplicate states, which removes brief transition artifacts and
+    # animated redraws that resolve to the same final slide.
+    merged: list[dict[str, Any]] = []
+    for item in provisional:
+        if merged and signature_difference(merged[-1]["signature"], item["signature"]) < 1.0:
+            merged[-1]["source_end"] = item["source_end"]
+            continue
+        merged.append(item)
+
+    if not merged:
+        raise RuntimeError("No stable slides were detected")
+    for index, item in enumerate(merged):
+        item["index"] = index + 1
+        item["end"] = merged[index + 1]["start"] if index + 1 < len(merged) else duration
+    merged[0]["alignment_start"] = 0.0
+    for item in merged[1:]:
+        item["alignment_start"] = item["start"]
+
+    cap = cv2.VideoCapture(str(video_path))
+    manifest: list[dict[str, Any]] = []
+    for item in merged:
+        frame = crop_pillarbox(extract_frame(cap, item["capture_time"]))
+        image_name = f"slide_{item['index']:03d}_{int(item['start']):06d}.jpg"
+        image_path = output_dir / image_name
+        cv2.imwrite(str(image_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        manifest.append(
+            {
+                "index": item["index"],
+                "start": item["start"],
+                "alignment_start": item["alignment_start"],
+                "end": item["end"],
+                "capture_time": item["capture_time"],
+                "image": str(image_path),
+            }
+        )
+    cap.release()
+    (output_dir / "slides.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return manifest, duration
+
+
+def transcribe(
+    video_path: Path,
+    work_dir: Path,
+    model_name: str,
+    model_cache: Path | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    # PyAV 19 removed the ``metadata_errors`` keyword while some Faster Whisper
+    # releases still pass it.  Keep the tool usable with either PyAV API.
+    import av
+
+    original_av_open = av.open
+
+    def compatible_av_open(*args, **kwargs):
+        try:
+            return original_av_open(*args, **kwargs)
+        except TypeError:
+            if "metadata_errors" not in kwargs:
+                raise
+            kwargs = dict(kwargs)
+            kwargs.pop("metadata_errors", None)
+            return original_av_open(*args, **kwargs)
+
+    av.open = compatible_av_open
+    from faster_whisper import WhisperModel
+
+    models_dir = model_cache or (work_dir / "models")
+    models_dir.mkdir(parents=True, exist_ok=True)
+    initial_prompt = LEGAL_PROMPT
+    attempts = [("cuda", "float16"), ("cpu", "int8")]
+    last_error: Exception | None = None
+    for device, compute_type in attempts:
+        try:
+            print(f"Loading Whisper model {model_name} on {device} ({compute_type})", flush=True)
+            model = WhisperModel(
+                model_name,
+                device=device,
+                compute_type=compute_type,
+                download_root=str(models_dir),
+            )
+            iterator, info = model.transcribe(
+                str(video_path),
+                language="en",
+                task="transcribe",
+                beam_size=5,
+                vad_filter=True,
+                condition_on_previous_text=True,
+                initial_prompt=initial_prompt,
+            )
+            segments = [
+                {
+                    "start": float(segment.start),
+                    "end": float(segment.end),
+                    "text": re.sub(r"\s+", " ", segment.text).strip(),
+                }
+                for segment in iterator
+                if segment.text.strip()
+            ]
+            return segments, device
+        except Exception as exc:
+            last_error = exc
+            print(f"Whisper attempt on {device} failed: {exc}", file=sys.stderr, flush=True)
+    raise RuntimeError(f"Transcription failed: {last_error}")
+
+
+def write_transcript_files(segments: list[dict[str, Any]], output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "transcript.json").write_text(json.dumps(segments, indent=2), encoding="utf-8")
+    with (output_dir / "transcript.txt").open("w", encoding="utf-8") as handle:
+        for segment in segments:
+            handle.write(f"[{format_time(segment['start'])}] {segment['text']}\n")
+    with (output_dir / "transcript.srt").open("w", encoding="utf-8") as handle:
+        for index, segment in enumerate(segments, 1):
+            handle.write(
+                f"{index}\n{format_time(segment['start'], True)} --> "
+                f"{format_time(segment['end'], True)}\n{segment['text']}\n\n"
+            )
+
+
+def align_segments(
+    slides: list[dict[str, Any]],
+    segments: list[dict[str, Any]],
+    comments: list[dict[str, Any]] | None = None,
+) -> None:
+    for slide in slides:
+        slide["segments"] = []
+        slide["comments"] = []
+
+    def matching_slide(timestamp: float) -> dict[str, Any]:
+        selected = slides[0]
+        for slide in slides:
+            if slide["alignment_start"] <= timestamp:
+                selected = slide
+            else:
+                break
+        return selected
+
+    for segment in segments:
+        midpoint = (segment["start"] + segment["end"]) / 2
+        matching_slide(midpoint)["segments"].append(segment)
+    for comment in comments or []:
+        matching_slide(float(comment["start"]))["comments"].append(comment)
+
+
+def omit_incidental_slide_appearances(
+    slides: list[dict[str, Any]],
+    maximum_duration: float = 8.0,
+    maximum_spoken_words: int = 3,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Remove brief, low-speech slide flicks caused by presentation navigation."""
+    if len(slides) <= 1:
+        return slides, []
+
+    kept: list[dict[str, Any]] = []
+    omitted: list[dict[str, Any]] = []
+    all_segments: list[dict[str, Any]] = []
+    all_comments: list[dict[str, Any]] = []
+    final_end = float(slides[-1]["end"])
+
+    for slide in slides:
+        segments = slide.get("segments", [])
+        comments = slide.get("comments", [])
+        all_segments.extend(segments)
+        all_comments.extend(comments)
+        spoken_words = sum(len(segment.get("text", "").split()) for segment in segments)
+        duration = float(slide["end"]) - float(slide["start"])
+        is_incidental = (
+            duration <= maximum_duration
+            and spoken_words <= maximum_spoken_words
+            and not comments
+        )
+        if is_incidental:
+            omitted.append(slide)
+        else:
+            kept.append(slide)
+
+    if not kept:
+        return slides, []
+
+    for index, slide in enumerate(kept):
+        slide["index"] = index + 1
+        slide["alignment_start"] = 0.0 if index == 0 else float(slide["start"])
+        slide["end"] = float(kept[index + 1]["start"]) if index + 1 < len(kept) else final_end
+    align_segments(kept, all_segments, all_comments)
+    return kept, omitted
+
+
+def grouped_transcript(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    previous_end: float | None = None
+    for segment in segments:
+        should_break = (
+            current is None
+            or (previous_end is not None and segment["start"] - previous_end > 2.5)
+            or len(current["text"]) >= 900
+        )
+        if should_break:
+            current = {"start": segment["start"], "end": segment["end"], "text": segment["text"]}
+            groups.append(current)
+        else:
+            current["text"] += " " + segment["text"]
+            current["end"] = segment["end"]
+        previous_end = segment["end"]
+    return groups
+
+
+def timeline_events(
+    segments: list[dict[str, Any]], comments: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Group speech while preserving exact insertion points for chat comments."""
+    source_events = [(float(item["start"]), 0, "comment", item) for item in comments]
+    source_events.extend((float(item["start"]), 1, "segment", item) for item in segments)
+    source_events.sort(key=lambda item: (item[0], item[1]))
+
+    events: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    previous_end: float | None = None
+
+    def flush_current() -> None:
+        nonlocal current
+        if current is not None:
+            events.append(current)
+            current = None
+
+    for _start, _order, kind, item in source_events:
+        if kind == "comment":
+            flush_current()
+            events.append(dict(item, kind="comment"))
+            previous_end = None
+            continue
+        should_break = (
+            current is None
+            or (previous_end is not None and item["start"] - previous_end > 2.5)
+            or len(current["text"]) >= 900
+        )
+        if should_break:
+            flush_current()
+            current = {
+                "kind": "transcript",
+                "start": item["start"],
+                "end": item["end"],
+                "text": item["text"],
+            }
+        else:
+            current["text"] += " " + item["text"]
+            current["end"] = item["end"]
+        previous_end = item["end"]
+    flush_current()
+    return events
+
+
+def set_style_font(style, name: str, size: float, bold: bool = False) -> None:
+    style.font.name = name
+    style.font.size = Pt(size)
+    style.font.bold = bold
+    style.font.color.rgb = RGBColor(0, 0, 0)
+    style._element.rPr.rFonts.set(qn("w:ascii"), name)
+    style._element.rPr.rFonts.set(qn("w:hAnsi"), name)
+
+
+def remove_style_borders(style) -> None:
+    properties = style._element.get_or_add_pPr()
+    borders = properties.find(qn("w:pBdr"))
+    if borders is not None:
+        properties.remove(borders)
+
+
+def set_image_alt_text(inline_shape, title: str, description: str) -> None:
+    doc_pr = inline_shape._inline.docPr
+    doc_pr.set("title", title)
+    doc_pr.set("descr", description)
+
+
+def add_page_number(paragraph) -> None:
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = paragraph.add_run()
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    instruction = OxmlElement("w:instrText")
+    instruction.set(qn("xml:space"), "preserve")
+    instruction.text = " PAGE "
+    separate = OxmlElement("w:fldChar")
+    separate.set(qn("w:fldCharType"), "separate")
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    run._r.extend([begin, instruction, separate, end])
+    run.font.size = Pt(9)
+
+
+def format_chat_comment(paragraph, comment: dict[str, Any]) -> None:
+    paragraph.paragraph_format.left_indent = Inches(0.16)
+    paragraph.paragraph_format.right_indent = Inches(0.08)
+    paragraph.paragraph_format.space_before = Pt(5)
+    paragraph.paragraph_format.space_after = Pt(7)
+    properties = paragraph._p.get_or_add_pPr()
+    shading = OxmlElement("w:shd")
+    shading.set(qn("w:fill"), "F2ECFA")
+    properties.append(shading)
+    borders = OxmlElement("w:pBdr")
+    left = OxmlElement("w:left")
+    left.set(qn("w:val"), "single")
+    left.set(qn("w:sz"), "18")
+    left.set(qn("w:space"), "8")
+    left.set(qn("w:color"), "6A1B9A")
+    borders.append(left)
+    properties.append(borders)
+
+    label = paragraph.add_run(
+        f"CHAT  [{format_time(comment['start'])}]  {comment['author']}"
+    )
+    label.bold = True
+    label.font.color.rgb = RGBColor(74, 20, 140)
+    label.add_break()
+    paragraph.add_run(comment["text"])
+
+
+def build_docx(
+    video_path: Path,
+    slides: list[dict[str, Any]],
+    duration: float,
+    output_path: Path,
+    transcription_device: str,
+    title_text: str,
+    omitted_slide_count: int = 0,
+) -> None:
+    document = Document()
+    section = document.sections[0]
+    section.page_width = Inches(8.5)
+    section.page_height = Inches(11)
+    section.top_margin = Inches(0.65)
+    section.bottom_margin = Inches(0.65)
+    section.left_margin = Inches(0.72)
+    section.right_margin = Inches(0.72)
+
+    set_style_font(document.styles["Normal"], "Aptos", 9.75)
+    set_style_font(document.styles["Title"], "Aptos Display", 24, True)
+    remove_style_borders(document.styles["Title"])
+    set_style_font(document.styles["Heading 1"], "Aptos Display", 15, True)
+    document.styles["Normal"].paragraph_format.space_after = Pt(7)
+    document.styles["Normal"].paragraph_format.line_spacing = 1.03
+    document.styles["Heading 1"].paragraph_format.space_before = Pt(4)
+    document.styles["Heading 1"].paragraph_format.space_after = Pt(8)
+    document.styles["Heading 1"].paragraph_format.keep_with_next = True
+
+    if "Transcript Label" not in document.styles:
+        label_style = document.styles.add_style("Transcript Label", WD_STYLE_TYPE.PARAGRAPH)
+        set_style_font(label_style, "Aptos", 9.75, True)
+        label_style.paragraph_format.space_before = Pt(10)
+        label_style.paragraph_format.space_after = Pt(4)
+        label_style.paragraph_format.keep_with_next = True
+
+    title = document.add_paragraph(style="Title")
+    title.add_run(title_text)
+    title.alignment = WD_ALIGN_PARAGRAPH.LEFT
+
+    intro = document.add_paragraph()
+    intro.add_run(
+        "This document aligns the lecture transcript with the slide displayed at each point in the video. "
+        "The transcript is machine-generated and should be checked against the recording before relying on "
+        "quotations, case names, statutory provisions or other precise legal wording."
+    )
+
+    metadata = document.add_paragraph()
+    metadata.add_run("Source video  ").bold = True
+    metadata.add_run(video_path.name + "\n")
+    metadata.add_run("Duration  ").bold = True
+    metadata.add_run(format_time(duration) + "\n")
+    metadata.add_run("Detected slide appearances  ").bold = True
+    metadata.add_run(str(len(slides)) + "\n")
+    if omitted_slide_count:
+        metadata.add_run("Brief navigation slide flicks omitted  ").bold = True
+        metadata.add_run(str(omitted_slide_count) + "\n")
+    comment_count = sum(len(slide.get("comments", [])) for slide in slides)
+    if comment_count:
+        metadata.add_run("Imported chat comments  ").bold = True
+        metadata.add_run(str(comment_count) + "\n")
+    metadata.add_run("Transcription processing  ").bold = True
+    if transcription_device == "reused":
+        metadata.add_run("Local Faster Whisper (cached local transcript)")
+    else:
+        metadata.add_run("Local Faster Whisper using " + transcription_device.upper())
+
+    footer = section.footer.paragraphs[0]
+    add_page_number(footer)
+
+    for slide_position, slide in enumerate(slides):
+        document.add_page_break()
+        heading = document.add_paragraph(style="Heading 1")
+        heading.add_run(f"Slide {slide_position + 1}  {format_time(slide['start'])}")
+
+        picture_paragraph = document.add_paragraph()
+        picture_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        picture_paragraph.paragraph_format.space_after = Pt(4)
+        picture_paragraph.paragraph_format.keep_with_next = True
+        inline_shape = picture_paragraph.add_run().add_picture(slide["image"], width=Inches(6.35))
+        set_image_alt_text(
+            inline_shape,
+            f"Slide {slide_position + 1}",
+            f"Lecture slide displayed at {format_time(slide['start'])}",
+        )
+
+        caption = document.add_paragraph()
+        caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        caption.paragraph_format.space_after = Pt(8)
+        caption.paragraph_format.keep_with_next = True
+        caption_run = caption.add_run(
+            f"Displayed approximately {format_time(slide['start'])} to {format_time(slide['end'])}"
+        )
+        caption_run.italic = True
+        caption_run.font.size = Pt(9)
+
+        document.add_paragraph("Transcript", style="Transcript Label")
+        segments = slide.get("segments", [])
+        comments = slide.get("comments", [])
+        if not segments and not comments:
+            paragraph = document.add_paragraph()
+            run = paragraph.add_run("No speech was detected while this slide was displayed.")
+            run.italic = True
+            continue
+        events = timeline_events(segments, comments)
+        for event in events:
+            if event["kind"] == "comment":
+                format_chat_comment(document.add_paragraph(), event)
+                continue
+            paragraph = document.add_paragraph()
+            timestamp_run = paragraph.add_run(f"[{format_time(event['start'])}] ")
+            timestamp_run.bold = True
+            paragraph.add_run(event["text"])
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    document.save(output_path)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Create a Word transcript aligned to automatically detected lecture slides."
+    )
+    parser.add_argument("video", type=Path)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--work-dir", type=Path, default=ROOT / "run")
+    parser.add_argument("--model", default="turbo")
+    parser.add_argument(
+        "--title",
+        help="Document title (defaults to '<video filename> Transcript and Slides').",
+    )
+    parser.add_argument("--slide-threshold", type=float, default=2.0)
+    parser.add_argument("--minimum-slide-duration", type=float, default=2.5)
+    parser.add_argument("--slides-only", action="store_true")
+    parser.add_argument("--reuse-transcript", action="store_true")
+    parser.add_argument(
+        "--comments",
+        type=Path,
+        help="Optional text or Markdown file containing copied timestamped chat comments.",
+    )
+    parser.add_argument(
+        "--keep-brief-slides",
+        action="store_true",
+        help="Keep very brief slide appearances even when they contain three or fewer spoken words.",
+    )
+    parser.add_argument("--brief-slide-seconds", type=float, default=8.0)
+    parser.add_argument("--brief-slide-max-words", type=int, default=3)
+    args = parser.parse_args()
+
+    video_path = args.video.resolve()
+    work_dir = args.work_dir.resolve()
+    slides_dir = work_dir / "slides"
+    transcript_dir = work_dir / "transcript"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    slides, duration = detect_slides(
+        video_path,
+        slides_dir,
+        threshold=args.slide_threshold,
+        minimum_duration=args.minimum_slide_duration,
+    )
+    print(f"Detected {len(slides)} stable slide appearances", flush=True)
+    if args.slides_only:
+        return
+
+    transcript_json = transcript_dir / "transcript.json"
+    if args.reuse_transcript and transcript_json.exists():
+        segments = json.loads(transcript_json.read_text(encoding="utf-8"))
+        transcription_device = "reused"
+    else:
+        segments, transcription_device = transcribe(video_path, work_dir, args.model)
+        write_transcript_files(segments, transcript_dir)
+    print(f"Transcribed {len(segments)} timestamped speech segments", flush=True)
+
+    comments = []
+    if args.comments:
+        comments = parse_chat_comments(args.comments.read_text(encoding="utf-8"))
+        print(f"Parsed {len(comments)} timestamped chat comments", flush=True)
+    align_segments(slides, segments, comments)
+    omitted_slides: list[dict[str, Any]] = []
+    if not args.keep_brief_slides:
+        slides, omitted_slides = omit_incidental_slide_appearances(
+            slides,
+            maximum_duration=args.brief_slide_seconds,
+            maximum_spoken_words=args.brief_slide_max_words,
+        )
+        print(f"Omitted {len(omitted_slides)} brief navigation slide appearances", flush=True)
+    alignment = [
+        {
+            key: value
+            for key, value in slide.items()
+            if key in {"index", "start", "end", "capture_time", "image", "segments", "comments"}
+        }
+        for slide in slides
+    ]
+    (work_dir / "alignment.json").write_text(json.dumps(alignment, indent=2), encoding="utf-8")
+    title_text = args.title or f"{video_path.stem} Transcript and Slides"
+    build_docx(
+        video_path,
+        slides,
+        duration,
+        args.output.resolve(),
+        transcription_device,
+        title_text,
+        len(omitted_slides),
+    )
+    print(f"Created {args.output.resolve()}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

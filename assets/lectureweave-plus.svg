@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="512"
+     height="512"
+     viewBox="0 0 512 512"
+     fill="none"
+     role="img"
+     aria-labelledby="iconTitle iconDesc">
+  <title id="iconTitle">LectureWeave+</title>
+  <desc id="iconDesc">The LectureWeave+ icon: a deep purple lecture slide and audio waveform paired with a pale transcript document.</desc>
+
+  <!-- Palette:
+       Primary purple: #36145F
+       Secondary purple: #6945A0
+       Mid lavender: #9A85C6
+       Pale lavender: #F1ECFC
+       Paper white: #FFFCFF
+       Gold accent: #F4AD45 -->
+
+  <!-- Presentation frame -->
+  <rect x="55" y="63" width="402" height="306" rx="35" fill="#36145F"/>
+
+  <!-- Slide surface -->
+  <rect x="82" y="91" width="348" height="202" rx="18" fill="#F1ECFC"/>
+
+  <!-- Left visual panel -->
+  <rect x="107" y="117" width="125" height="145" rx="15" fill="#DDD2F5"/>
+
+  <!-- Simplified pie chart -->
+  <circle cx="169.5" cy="174" r="34" fill="#6945A0"/>
+  <path d="M169.5 140 A34 34 0 0 1 203.5 174 L169.5 174 Z" fill="#F4AD45"/>
+  <circle cx="169.5" cy="174" r="11" fill="#DDD2F5"/>
+
+  <!-- Slide caption bar -->
+  <rect x="126" y="225" width="87" height="14" rx="7" fill="#6945A0"/>
+
+  <!-- Slide content lines -->
+  <rect x="252" y="129" width="143" height="16" rx="8" fill="#36145F"/>
+  <rect x="252" y="162" width="112" height="14" rx="7" fill="#9A85C6"/>
+  <rect x="252" y="190" width="130" height="14" rx="7" fill="#9A85C6"/>
+
+  <!-- Audio waveform - simplified to four thicker bars -->
+  <g fill="#F4AD45">
+    <rect x="112" y="316" width="18" height="28" rx="9"/>
+    <rect x="140" y="304" width="18" height="52" rx="9"/>
+    <rect x="168" y="296" width="18" height="68" rx="9"/>
+    <rect x="196" y="309" width="18" height="42" rx="9"/>
+  </g>
+
+  <!-- Foreground transcript document, enlarged slightly -->
+  <path d="M257 197 H371 L443 269 V431 Q443 457 417 457 H257 Q231 457 231 431 V223 Q231 197 257 197 Z"
+        fill="#FFFCFF" stroke="#36145F" stroke-width="14" stroke-linejoin="round"/>
+
+  <!-- Folded corner -->
+  <path d="M371 201 V253 Q371 269 387 269 H439"
+        stroke="#36145F" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Document accent -->
+  <rect x="259" y="248" width="74" height="17" rx="8.5" fill="#F4AD45"/>
+
+  <!-- Transcript lines, slightly thicker -->
+  <g fill="#6945A0">
+    <rect x="259" y="300" width="146" height="16" rx="8"/>
+    <rect x="259" y="332" width="146" height="16" rx="8"/>
+    <rect x="259" y="364" width="115" height="16" rx="8"/>
+    <rect x="259" y="409" width="126" height="16" rx="8"/>
+  </g>
+
+  <!-- Chat / annotation dot -->
+  <circle cx="402" cy="417" r="8" fill="#F4AD45"/>
+</svg>

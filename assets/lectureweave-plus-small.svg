@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="512"
+     height="512"
+     viewBox="0 0 512 512"
+     fill="none"
+     role="img"
+     aria-labelledby="iconTitle iconDesc">
+  <title id="iconTitle">LectureWeave+</title>
+  <desc id="iconDesc">The simplified small-size LectureWeave+ icon showing a lecture slide, audio waveform and transcript document.</desc>
+
+  <!-- Presentation frame -->
+  <rect x="58" y="68" width="396" height="300" rx="36" fill="#36145F"/>
+  <rect x="87" y="97" width="338" height="193" rx="18" fill="#F1ECFC"/>
+
+  <!-- Stronger, simpler slide cues -->
+  <rect x="111" y="122" width="120" height="137" rx="16" fill="#DDD2F5"/>
+  <circle cx="171" cy="176" r="33" fill="#6945A0"/>
+  <path d="M171 143 A33 33 0 0 1 204 176 L171 176 Z" fill="#F4AD45"/>
+  <rect x="126" y="224" width="90" height="16" rx="8" fill="#6945A0"/>
+
+  <!-- Heavier transcript relationship lines on slide -->
+  <rect x="251" y="132" width="142" height="18" rx="9" fill="#36145F"/>
+  <rect x="251" y="166" width="118" height="16" rx="8" fill="#9A85C6"/>
+  <rect x="251" y="196" width="133" height="16" rx="8" fill="#9A85C6"/>
+
+  <!-- Simplified waveform -->
+  <g fill="#F4AD45">
+    <rect x="116" y="313" width="22" height="30" rx="11"/>
+    <rect x="148" y="299" width="22" height="58" rx="11"/>
+    <rect x="180" y="309" width="22" height="40" rx="11"/>
+  </g>
+
+  <!-- Enlarged document without fold for small sizes -->
+  <rect x="233" y="202" width="198" height="250" rx="24" fill="#FFFCFF" stroke="#36145F" stroke-width="15"/>
+  <rect x="257" y="246" width="81" height="18" rx="9" fill="#F4AD45"/>
+
+  <!-- Only three thicker transcript lines -->
+  <g fill="#6945A0">
+    <rect x="257" y="299" width="147" height="18" rx="9"/>
+    <rect x="257" y="334" width="147" height="18" rx="9"/>
+    <rect x="257" y="369" width="119" height="18" rx="9"/>
+  </g>
+
+  <circle cx="402" cy="412" r="9" fill="#F4AD45"/>
+</svg>
