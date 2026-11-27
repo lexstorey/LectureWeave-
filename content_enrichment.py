@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 from rapidfuzz.fuzz import token_set_ratio
 
-from slide_detection import hash_distance, hsv_histogram_similarity, perceptual_hash
+from slide_detection import hash_distance, perceptual_hash
 
 
 ProgressCallback = Callable[[str, int, int, str], None]
@@ -98,6 +98,25 @@ def _image_features(path: str) -> tuple[np.ndarray, np.ndarray] | None:
     return perceptual_hash(small), cv2.resize(small, (96, 54), interpolation=cv2.INTER_AREA)
 
 
+def _smoothed_histogram_similarity(left: np.ndarray, right: np.ndarray) -> float:
+    """Hue/saturation histogram correlation that tolerates neighbouring bins.
+
+    Pale, near-grey slides have unstable hue: two renderings of the same page
+    can fall into adjacent hue bins and correlate at zero. Spreading each bin
+    into its (circular) hue neighbours and saturation neighbours fixes that.
+    """
+    def histogram(image: np.ndarray) -> np.ndarray:
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        values = cv2.calcHist([hsv], [0, 1], None, [24, 16], [0, 180, 0, 256])
+        values = values + 0.5 * np.roll(values, 1, axis=0) + 0.5 * np.roll(values, -1, axis=0)
+        padded = np.pad(values, ((0, 0), (1, 1)), mode="edge")
+        values = values + 0.5 * padded[:, :-2] + 0.5 * padded[:, 2:]
+        cv2.normalize(values, values)
+        return values.astype(np.float32)
+
+    return float(cv2.compareHist(histogram(left), histogram(right), cv2.HISTCMP_CORREL))
+
+
 def _assign_page(slide: dict[str, Any], page: DeckPage, source: str, confidence: str,
                  alternative: DeckPage | None = None) -> None:
     slide["deck_slide_number"] = page.number
@@ -136,7 +155,7 @@ def match_deck_pages(slides: list[dict[str, Any]], pages: list[DeckPage]) -> Non
                 page_hash, page_hist = page_features
                 distance = hash_distance(slide_hash, page_hash)
                 histogram_penalty = max(
-                    0.0, 1.0 - hsv_histogram_similarity(slide_hist, page_hist)
+                    0.0, 1.0 - _smoothed_histogram_similarity(slide_hist, page_hist)
                 ) * 18
                 visual_score = distance + histogram_penalty
                 text_score = float(token_set_ratio(slide.get("slide_text", ""), page.text))

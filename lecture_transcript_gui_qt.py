@@ -44,8 +44,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from chat_alignment import ChatClockFit, apply_chat_clock, estimate_chat_clock
+from claude_pack import build_claude_pack, build_visuals_pdf, write_claude_instructions
 from content_enrichment import (
     extract_slide_deck,
+    load_glossary,
     match_deck_pages,
     run_slide_ocr,
     transcription_vocabulary,
@@ -71,6 +74,7 @@ from lecture_to_docx import (
     omit_incidental_slide_appearances,
     parse_chat_comments,
     prepare_whisper_model,
+    TRANSCRIPTION_SETTINGS_VERSION,
     transcribe,
     whisper_model_is_cached,
     write_transcript_files,
@@ -249,6 +253,34 @@ class DropArea(QLabel):
             event.acceptProposedAction()
 
 
+class DeckList(QListWidget):
+    """Slide packs in deck order (A, B, …); accepts dropped files."""
+
+    files_dropped = Signal(list)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setAcceptDrops(True)
+        self.setMaximumHeight(110)
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event) -> None:  # type: ignore[override]
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+        if paths:
+            self.files_dropped.emit(paths)
+            event.acceptProposedAction()
+
+    def paths(self) -> list[Path]:
+        return [Path(self.item(row).data(Qt.ItemDataRole.UserRole)) for row in range(self.count())]
+
+
 class SignalWriter(io.TextIOBase):
     def __init__(self, signal: Signal) -> None:
         self.signal = signal
@@ -387,9 +419,15 @@ class ProcessingThread(QThread):
         reuse_transcript: bool,
         omit_brief_slides: bool,
         model_name: str,
-        deck_path: Path | None,
+        deck_paths: list[Path],
         whisperx_python: Path | None,
         hf_token: str | None,
+        glossary_path: Path | None = None,
+        auto_chat_clock: bool = True,
+        manual_chat_offset: float = 0.0,
+        write_pack: bool = True,
+        write_docx: bool = True,
+        pseudonymise: bool = True,
     ) -> None:
         super().__init__()
         self.video = video
@@ -399,7 +437,15 @@ class ProcessingThread(QThread):
         self.reuse_transcript = reuse_transcript
         self.omit_brief_slides = omit_brief_slides
         self.model_name = model_name
-        self.deck_path = deck_path
+        self.deck_paths = list(deck_paths or [])
+        self.glossary_path = glossary_path
+        self.auto_chat_clock = auto_chat_clock
+        self.manual_chat_offset = manual_chat_offset
+        self.write_pack = write_pack
+        self.write_docx = write_docx
+        self.pseudonymise = pseudonymise
+        self.result_files: list[Path] = []
+        self.result_notes: list[str] = []
         self.whisperx_python = whisperx_python
         self.hf_token = hf_token
         self.review_event = threading.Event()
@@ -464,34 +510,44 @@ class ProcessingThread(QThread):
                 )
                 print(f"Detected {len(slides)} stable slide appearances")
 
-                if self.deck_path:
+                deck_pages = []
+                deck_summaries: list[dict] = []
+                for deck_index, deck_path in enumerate(self.deck_paths):
+                    label = chr(ord("A") + deck_index)
                     deck_fingerprint = hashlib.sha256(
                         (
-                            f"{self.deck_path}|{self.deck_path.stat().st_size}|"
-                            f"{self.deck_path.stat().st_mtime_ns}"
+                            f"{deck_path}|{deck_path.stat().st_size}|"
+                            f"{deck_path.stat().st_mtime_ns}"
                         ).encode("utf-8")
                     ).hexdigest()[:16]
-                    deck_pages = extract_slide_deck(
-                        self.deck_path,
+                    pages = extract_slide_deck(
+                        deck_path,
                         work_dir / "deck" / deck_fingerprint,
                         self.report_progress,
                     )
-                    self.status.emit("Extracting searchable text from the captured slides…")
-                    run_slide_ocr(slides, self.report_progress)
+                    for page in pages:
+                        page.deck = label
+                    deck_pages.extend(pages)
+                    deck_summaries.append({"label": label, "name": deck_path.name, "pages": len(pages)})
+                self.status.emit("Extracting searchable text from the slides…")
+                run_slide_ocr(slides, self.report_progress)
+                if deck_pages:
                     match_deck_pages(slides, deck_pages)
                     matched = sum(bool(slide.get("deck_slide_number")) for slide in slides)
                     print(
                         f"Matched {matched} of {len(slides)} video appearances to "
-                        f"{len(deck_pages)} supplied deck slides"
+                        f"{len(deck_pages)} slides in {len(deck_summaries)} deck(s)"
                     )
-                else:
-                    self.status.emit("Extracting searchable text from the slides…")
-                    run_slide_ocr(slides, self.report_progress)
-                vocabulary = transcription_vocabulary(slides)
-                vocabulary_key = hashlib.sha256(vocabulary.encode("utf-8")).hexdigest()[:12]
+                glossary = load_glossary(self.glossary_path)
+                if glossary:
+                    print(f"Loaded {len(glossary)} glossary term(s)")
+                vocabulary = transcription_vocabulary(slides, glossary=glossary)
+                vocabulary_key = hashlib.sha256(
+                    f"{TRANSCRIPTION_SETTINGS_VERSION}|{vocabulary}".encode("utf-8")
+                ).hexdigest()[:12]
                 transcript_dir = work_dir / f"transcript-{model_cache_key}-{vocabulary_key}"
                 if vocabulary:
-                    print(f"Prepared {len(vocabulary)} characters of slide-derived terminology")
+                    print(f"Whisper terminology (best first): {vocabulary[:300]}")
 
                 transcript_json = transcript_dir / "transcript.json"
                 if self.reuse_transcript and transcript_json.exists():
@@ -556,7 +612,16 @@ class ProcessingThread(QThread):
                     0,
                     f"Aligning {len(segments)} speech segments and {len(self.comments)} chat comments…",
                 )
-                align_segments(slides, segments, self.comments)
+                comments = self.comments
+                chat_clock = ChatClockFit(0.0, 0.0, 0, "none")
+                if comments:
+                    if self.auto_chat_clock:
+                        chat_clock = estimate_chat_clock(comments, segments)
+                    elif self.manual_chat_offset:
+                        chat_clock = ChatClockFit(self.manual_chat_offset, 0.0, 0, "manual")
+                    comments = apply_chat_clock(comments, chat_clock)
+                    print(f"Chat clock: {chat_clock.describe()}")
+                align_segments(slides, segments, comments)
                 omitted_slides: list[dict] = []
                 if self.omit_brief_slides:
                     slides, omitted_slides = omit_incidental_slide_appearances(slides)
@@ -588,6 +653,9 @@ class ProcessingThread(QThread):
                             "comments",
                             "canonical_index",
                             "deck_slide_number",
+                            "deck_label",
+                            "match_confidence",
+                            "match_alternative",
                             "deck_text",
                             "deck_image",
                             "slide_text",
@@ -600,23 +668,62 @@ class ProcessingThread(QThread):
                     json.dumps(alignment, indent=2), encoding="utf-8"
                 )
 
-                self.status.emit("Creating and formatting the Word document…")
-                build_docx(
-                    self.video,
-                    slides,
-                    duration,
-                    staging_output,
-                    device,
-                    self.title,
-                    len(omitted_slides),
-                    progress_callback=self.report_progress,
-                )
+                pack_path = self.output.with_suffix(".md")
+                if self.write_pack:
+                    self.status.emit("Writing the Claude pack…")
+                    visual_labels: dict[int, str] = {}
+                    visuals_path = self.output.with_name(f"{self.output.stem} visuals.pdf")
+                    if any(not slide.get("deck_slide_number") for slide in slides):
+                        visual_labels = build_visuals_pdf(slides, visuals_path)
+                    summary = build_claude_pack(
+                        output_path=pack_path,
+                        title=self.title,
+                        video_name=self.video.name,
+                        duration=duration,
+                        slides=slides,
+                        omitted=omitted_slides,
+                        decks=deck_summaries,
+                        comments_total=len(self.comments),
+                        chat_clock=chat_clock.describe(),
+                        model_name=self.model_name,
+                        glossary=glossary,
+                        pseudonymise=self.pseudonymise,
+                        visual_labels=visual_labels,
+                    )
+                    self.result_files.append(pack_path)
+                    if visual_labels:
+                        self.result_files.append(visuals_path)
+                    self.result_files.append(write_claude_instructions(pack_path.parent))
+                    self.result_notes.append(
+                        f"Claude pack: about {summary['approx_tokens']:,} tokens, "
+                        f"{summary['slides']} slide spans, {summary['off_slide']} off-slide segment(s), "
+                        f"{summary['chat_kept']} of {summary['chat_total']} chat comments kept, "
+                        f"{summary['uncertain_words']} uncertain word(s) marked."
+                    )
+                    self.result_notes.append(f"Chat clock: {chat_clock.describe()}.")
+                    print(f"Created {pack_path}")
                 self.raise_if_cancelled()
-                os.replace(staging_output, self.output)
+
+                if self.write_docx:
+                    self.status.emit("Creating and formatting the Word document…")
+                    build_docx(
+                        self.video,
+                        slides,
+                        duration,
+                        staging_output,
+                        device,
+                        self.title,
+                        len(omitted_slides),
+                        progress_callback=self.report_progress,
+                    )
+                    self.raise_if_cancelled()
+                    os.replace(staging_output, self.output)
+                    self.result_files.insert(0, self.output)
+                    print(f"Created {self.output}")
                 print(f"Imported {len(self.comments)} chat comments")
-                print(f"Created {self.output}")
             writer.flush()
-            self.completed.emit(str(self.output))
+            primary = self.output if self.write_docx else self.output.with_suffix(".md")
+            self.completed.emit(str(primary))
         except ProcessingCancelled:
             writer.flush()
             if staging_output.exists():
@@ -923,6 +1030,9 @@ class MainWindow(QMainWindow):
             QFrame#segmented {{ background: #ECE8F0; border: none; border-radius: 8px; }}
             QLineEdit, QTextEdit, QComboBox {{ background: white; color: {TEXT}; border: 1px solid #CFC9D5; border-radius: 8px; padding: 8px 10px; font-family: 'Segoe UI'; font-size: 10pt; }}
             QLineEdit:focus, QTextEdit:focus, QComboBox:focus {{ border: 2px solid {PURPLE}; }}
+            QListWidget {{ background: white; color: {TEXT}; border: 1px solid #CFC9D5; border-radius: 8px; padding: 4px; font-family: 'Segoe UI'; font-size: 10pt; }}
+            QListWidget::item {{ padding: 4px 6px; border-radius: 4px; }}
+            QListWidget::item:selected {{ background: {PURPLE_LIGHT}; color: {PURPLE_DARK}; }}
             QLineEdit#mono, QTextEdit#log {{ font-family: Consolas; font-size: 9pt; background: #FAF9FC; }}
             QPushButton {{ background: #ECE8F0; color: {TEXT}; border: 1px solid #D0C8D7; border-radius: 8px; padding: 8px 14px; min-height: 22px; font-family: 'Segoe UI'; font-size: 10pt; }}
             QPushButton:hover {{ background: #E2D8EC; }}
@@ -1080,27 +1190,32 @@ class MainWindow(QMainWindow):
         # Slide pack
         deck_card, deck_layout = self.card()
         deck_heading = QHBoxLayout()
-        deck_heading.addWidget(self.section_label("Slide pack"))
+        deck_heading.addWidget(self.section_label("Slide decks"))
         deck_heading.addWidget(self.hint_label("optional, recommended"))
         deck_heading.addStretch(1)
         deck_layout.addLayout(deck_heading)
-        deck_row = QHBoxLayout()
-        self.deck_edit = DropLineEdit()
-        self.deck_edit.setPlaceholderText("Choose or drop a PDF or PowerPoint slide pack")
-        self.deck_edit.file_dropped.connect(self.set_deck)
-        choose_deck = QPushButton("Choose…")
+        self.deck_list = DeckList()
+        self.deck_list.files_dropped.connect(lambda paths: [self.set_deck(path) for path in paths])
+        deck_layout.addWidget(self.deck_list)
+        deck_buttons = QHBoxLayout()
+        choose_deck = QPushButton("Add deck…")
         choose_deck.clicked.connect(self.browse_deck)
+        remove_deck = QPushButton("Remove")
+        remove_deck.setObjectName("quiet")
+        remove_deck.clicked.connect(self.remove_selected_deck)
         clear_deck = QPushButton("Clear")
         clear_deck.setObjectName("quiet")
-        clear_deck.clicked.connect(self.deck_edit.clear)
-        deck_row.addWidget(self.deck_edit, 1)
-        deck_row.addWidget(choose_deck)
-        deck_row.addWidget(clear_deck)
-        deck_layout.addLayout(deck_row)
+        clear_deck.clicked.connect(self.clear_decks)
+        deck_buttons.addWidget(choose_deck)
+        deck_buttons.addWidget(remove_deck)
+        deck_buttons.addWidget(clear_deck)
+        deck_buttons.addStretch(1)
+        deck_layout.addLayout(deck_buttons)
         deck_layout.addWidget(
             self.hint_label(
-                "A PDF gives exact slide numbers, native text and clean images. Without a deck, "
-                "slide text is read from the video with local OCR."
+                "Add every pack the lecture uses (PDF or PowerPoint); they are labelled A, B, … "
+                "A PDF gives exact slide numbers, native text and clean images. Frames that match "
+                "no deck are read from the video with local OCR."
             )
         )
         left_column.addWidget(deck_card)
@@ -1135,6 +1250,26 @@ class MainWindow(QMainWindow):
         chat_buttons.addWidget(clear_chat)
         chat_buttons.addStretch(1)
         comments_layout.addLayout(chat_buttons)
+        chat_options = QHBoxLayout()
+        self.chat_clock_check = QCheckBox("Auto-align chat clock to spoken answers")
+        self.chat_clock_check.setChecked(True)
+        self.chat_offset_spin = QSpinBox()
+        self.chat_offset_spin.setRange(-1800, 1800)
+        self.chat_offset_spin.setSuffix(" s")
+        self.chat_offset_spin.setToolTip("Manual chat clock offset, used when auto-align is off")
+        self.chat_offset_spin.setEnabled(False)
+        self.chat_clock_check.toggled.connect(lambda checked: self.chat_offset_spin.setEnabled(not checked))
+        chat_options.addWidget(self.chat_clock_check)
+        chat_options.addStretch(1)
+        chat_options.addWidget(self.hint_label("Manual offset"))
+        chat_options.addWidget(self.chat_offset_spin)
+        comments_layout.addLayout(chat_options)
+        self.pseudonymise_check = QCheckBox("Pseudonymise students in the Claude pack (Student A, B, …)")
+        self.pseudonymise_check.setChecked(self.settings.value("pack/pseudonymise", True, type=bool))
+        self.pseudonymise_check.toggled.connect(
+            lambda checked: self.settings.setValue("pack/pseudonymise", checked)
+        )
+        comments_layout.addWidget(self.pseudonymise_check)
         left_column.addWidget(comments_card)
         left_column.addStretch(1)
 
@@ -1145,7 +1280,16 @@ class MainWindow(QMainWindow):
         output_layout.addWidget(self.field_label("Title"))
         self.title_edit = QLineEdit()
         output_layout.addWidget(self.title_edit)
-        output_layout.addWidget(self.field_label("Save Word document as"))
+        output_layout.addWidget(self.field_label("Create"))
+        self.pack_check = QCheckBox("Claude pack (.md) — full transcript by slide, for your study Claude")
+        self.pack_check.setChecked(self.settings.value("output/pack", True, type=bool))
+        self.pack_check.toggled.connect(lambda checked: self.settings.setValue("output/pack", checked))
+        self.docx_check = QCheckBox("Word reading copy (.docx) — slide images and transcript")
+        self.docx_check.setChecked(self.settings.value("output/docx", True, type=bool))
+        self.docx_check.toggled.connect(lambda checked: self.settings.setValue("output/docx", checked))
+        output_layout.addWidget(self.pack_check)
+        output_layout.addWidget(self.docx_check)
+        output_layout.addWidget(self.field_label("Save as"))
         output_row = QHBoxLayout()
         self.output_edit = QLineEdit()
         choose_output = QPushButton("Choose…")
@@ -1183,6 +1327,27 @@ class MainWindow(QMainWindow):
                 "download of about 3 GB; LectureWeave+ asks before downloading."
             )
         )
+        output_layout.addWidget(self.field_label("Unit glossary"))
+        glossary_row = QHBoxLayout()
+        self.glossary_edit = DropLineEdit()
+        self.glossary_edit.setPlaceholderText("Optional .txt: one name, acronym or term per line")
+        self.glossary_edit.setText(str(self.settings.value("glossary/path", "") or ""))
+        self.glossary_edit.file_dropped.connect(self.set_glossary)
+        choose_glossary = QPushButton("Choose…")
+        choose_glossary.clicked.connect(self.browse_glossary)
+        clear_glossary = QPushButton("Clear")
+        clear_glossary.setObjectName("quiet")
+        clear_glossary.clicked.connect(lambda: self.set_glossary(""))
+        glossary_row.addWidget(self.glossary_edit, 1)
+        glossary_row.addWidget(choose_glossary)
+        glossary_row.addWidget(clear_glossary)
+        output_layout.addLayout(glossary_row)
+        output_layout.addWidget(
+            self.hint_label(
+                "Glossary terms go to Whisper first, ahead of terms taken from the slides. Use it "
+                "for names, Acts, cases and acronyms the transcript keeps getting wrong."
+            )
+        )
 
         advanced_toggle = self.disclosure_button("Advanced options")
         output_layout.addWidget(advanced_toggle)
@@ -1211,7 +1376,7 @@ class MainWindow(QMainWindow):
 
         # Run panel: primary action, progress and results
         run_card, run_layout = self.card()
-        self.start_button = QPushButton("Create Word document")
+        self.start_button = QPushButton("Create lecture pack")
         self.start_button.setObjectName("primary")
         self.start_button.clicked.connect(self.start_processing)
         run_layout.addWidget(self.start_button)
@@ -1228,7 +1393,7 @@ class MainWindow(QMainWindow):
         self.cancel_button.setEnabled(False)
         self.cancel_button.setVisible(False)
         self.cancel_button.clicked.connect(self.cancel_processing)
-        self.open_button = QPushButton("Open document")
+        self.open_button = QPushButton("Open result")
         self.open_button.setEnabled(False)
         self.open_button.clicked.connect(self.open_output)
         self.folder_button = QPushButton("Open folder")
@@ -1419,22 +1584,62 @@ class MainWindow(QMainWindow):
             self.output_edit.setText(selected)
 
     def browse_deck(self) -> None:
-        selected, _ = QFileDialog.getOpenFileName(
+        selected, _ = QFileDialog.getOpenFileNames(
             self,
-            "Choose optional slide pack",
+            "Add slide packs",
             "",
             "Slide packs (*.pdf *.pptx *.pptm);;All files (*.*)",
         )
-        if selected:
-            self.set_deck(selected)
+        for path in selected:
+            self.set_deck(path)
 
     def set_deck(self, value: str) -> None:
         path = Path(value).expanduser().resolve()
         if path.suffix.lower() not in {".pdf", ".pptx", ".pptm"}:
             QMessageBox.warning(self, APP_NAME, "Choose a PDF or PowerPoint slide pack.")
             return
-        self.deck_edit.setText(str(path))
-        self.status.setText("Slide pack selected. It will be matched to the video timeline automatically.")
+        if path in self.deck_list.paths():
+            return
+        if self.deck_list.count() >= 26:
+            QMessageBox.warning(self, APP_NAME, "Up to 26 slide packs can be added.")
+            return
+        from PySide6.QtWidgets import QListWidgetItem
+
+        item = QListWidgetItem()
+        item.setData(Qt.ItemDataRole.UserRole, str(path))
+        self.deck_list.addItem(item)
+        self.relabel_decks()
+        self.status.setText("Slide pack added. It will be matched to the video timeline automatically.")
+
+    def relabel_decks(self) -> None:
+        for row in range(self.deck_list.count()):
+            item = self.deck_list.item(row)
+            path = Path(item.data(Qt.ItemDataRole.UserRole))
+            item.setText(f"{chr(ord('A') + row)}   {path.name}")
+            item.setToolTip(str(path))
+
+    def remove_selected_deck(self) -> None:
+        for item in self.deck_list.selectedItems():
+            self.deck_list.takeItem(self.deck_list.row(item))
+        self.relabel_decks()
+
+    def clear_decks(self) -> None:
+        self.deck_list.clear()
+
+    def browse_glossary(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self, "Choose a unit glossary", "", "Text files (*.txt);;All files (*.*)"
+        )
+        if selected:
+            self.set_glossary(selected)
+
+    def set_glossary(self, value: str) -> None:
+        value = str(value).strip().strip('"')
+        self.glossary_edit.setText(value)
+        self.settings.setValue("glossary/path", value)
+        if value:
+            terms = load_glossary(Path(value))
+            self.status.setText(f"Glossary loaded: {len(terms)} term(s).")
 
     def browse_whisperx(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
@@ -1697,7 +1902,10 @@ class MainWindow(QMainWindow):
             return
         output_text = self.output_edit.text().strip().strip('"')
         if not output_text:
-            QMessageBox.critical(self, APP_NAME, "Choose where to save the Word document.")
+            QMessageBox.critical(self, APP_NAME, "Choose where to save the results.")
+            return
+        if not (self.pack_check.isChecked() or self.docx_check.isChecked()):
+            QMessageBox.critical(self, APP_NAME, "Choose at least one output: the Claude pack or the Word copy.")
             return
         output = Path(output_text)
         if output.suffix.lower() != ".docx":
@@ -1715,10 +1923,15 @@ class MainWindow(QMainWindow):
             if answer != QMessageBox.StandardButton.Yes:
                 return
 
-        deck_text = self.deck_edit.text().strip().strip('"')
-        deck_path = Path(deck_text).resolve() if deck_text else None
-        if deck_path and (not deck_path.is_file() or deck_path.suffix.lower() not in {".pdf", ".pptx", ".pptm"}):
-            QMessageBox.critical(self, APP_NAME, "The selected slide pack is not a valid PDF or PowerPoint file.")
+        deck_paths = self.deck_list.paths()
+        for deck_path in deck_paths:
+            if not deck_path.is_file() or deck_path.suffix.lower() not in {".pdf", ".pptx", ".pptm"}:
+                QMessageBox.critical(self, APP_NAME, f"This slide pack is missing or not a PDF or PowerPoint file:\n\n{deck_path}")
+                return
+        glossary_text = self.glossary_edit.text().strip().strip('"')
+        glossary_path = Path(glossary_text) if glossary_text else None
+        if glossary_path and not glossary_path.is_file():
+            QMessageBox.critical(self, APP_NAME, "The unit glossary file could not be found.")
             return
 
         model_name = self.preflight_transcription_model()
@@ -1749,9 +1962,15 @@ class MainWindow(QMainWindow):
             self.reuse_check.isChecked(),
             self.omit_check.isChecked(),
             model_name,
-            deck_path,
+            deck_paths,
             whisperx_python,
             hf_token,
+            glossary_path=glossary_path,
+            auto_chat_clock=self.chat_clock_check.isChecked(),
+            manual_chat_offset=float(self.chat_offset_spin.value()),
+            write_pack=self.pack_check.isChecked(),
+            write_docx=self.docx_check.isChecked(),
+            pseudonymise=self.pseudonymise_check.isChecked(),
         )
         self.worker.status.connect(self.status.setText)
         self.worker.progress.connect(self.processing_progress)
@@ -1922,12 +2141,14 @@ class MainWindow(QMainWindow):
         self.open_button.setEnabled(True)
         self.folder_button.setEnabled(True)
         self.last_output = Path(value)
-        self.status.setText("Finished. The Word document is ready.")
-        QMessageBox.information(
-            self,
-            APP_NAME,
-            f"Finished creating:\n\n{value}",
-        )
+        files = list(getattr(self.worker, "result_files", []) or [Path(value)])
+        notes = list(getattr(self.worker, "result_notes", []) or [])
+        self.status.setText("Finished. " + (notes[0] if notes else "Your files are ready."))
+        message = "Finished creating:\n\n" + "\n".join(f"• {path.name}" for path in files)
+        message += f"\n\nIn: {files[0].parent}"
+        if notes:
+            message += "\n\n" + "\n".join(notes)
+        QMessageBox.information(self, APP_NAME, message)
 
     def processing_cancelled(self) -> None:
         self.progress.setRange(0, 1)

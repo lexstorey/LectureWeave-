@@ -819,7 +819,13 @@ def split_at_slide_boundaries(
     straddling the change.
     """
     start, end = float(segment["start"]), float(segment["end"])
-    inside = [boundary for boundary in boundaries if start < boundary < end]
+    # A change within the snap distance of either end needs no split: the
+    # midpoint already files the segment under the right slide.
+    inside = [
+        boundary
+        for boundary in boundaries
+        if start + 1.0 < boundary < end - 1.0
+    ]
     if not inside:
         return [segment]
     words = [word for word in segment.get("words") or [] if "start" in word and "end" in word]
