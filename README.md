@@ -23,6 +23,7 @@ machine-generated transcript text and optional chat comments.
 - Review screen for correcting deck numbers, slide text and transcript before export
 - Word document generation that separates slide text from the lecturer's discussion
 - Claude-ready Markdown, structured JSON, slide assets and a self-contained ZIP packet
+- Windows-safe, shortened Claude bundle paths so long lecture titles still extract normally
 - Optional external WhisperX word alignment and anonymous speaker labels
 - A masked Hugging Face token field backed by Windows Credential Manager, so
   speaker access can be saved once without placing the token in settings files

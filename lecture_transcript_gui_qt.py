@@ -65,6 +65,7 @@ from whisperx_bridge import (
 from lecture_to_docx import (
     align_segments,
     build_docx,
+    claude_output_paths,
     detect_slides,
     format_time,
     omit_incidental_slide_appearances,
@@ -78,7 +79,7 @@ from lecture_to_docx import (
 
 
 APP_NAME = "LectureWeave+"
-APP_VERSION = "0.3.5"
+APP_VERSION = "0.3.6"
 REPOSITORY_URL = "https://github.com/lexstorey/LectureWeave-"
 PURPLE = "#4A148C"
 PURPLE_DARK = "#32105D"
@@ -1725,9 +1726,7 @@ class MainWindow(QMainWindow):
         self.open_button.setEnabled(True)
         self.folder_button.setEnabled(True)
         self.last_output = Path(value)
-        packet = self.last_output.with_suffix("").with_name(
-            self.last_output.with_suffix("").name + " - Claude Packet.zip"
-        )
+        packet = claude_output_paths(self.last_output)["packet"]
         self.status.setText("Finished. Word and Claude-ready outputs are ready.")
         QMessageBox.information(
             self,

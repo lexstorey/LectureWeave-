@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import io
 import json
@@ -52,6 +53,23 @@ LEGAL_PROMPT = (
 )
 
 ProgressCallback = Callable[[str, int, int, str], None]
+CLAUDE_BASENAME_LIMIT = 48
+
+
+def claude_output_paths(output_path: Path) -> dict[str, Path]:
+    """Return short, stable companion paths that remain extractable on Windows."""
+    stem = output_path.with_suffix("")
+    base = re.sub(r"\s+Transcript and Slides$", "", stem.name, flags=re.IGNORECASE)
+    base = re.sub(r'[<>:"/\\|?*]+', "-", base).strip(" .-") or "Lecture"
+    if len(base) > CLAUDE_BASENAME_LIMIT:
+        digest = hashlib.sha256(stem.name.encode("utf-8")).hexdigest()[:8]
+        base = f"{base[:CLAUDE_BASENAME_LIMIT - 9].rstrip()}-{digest}"
+    return {
+        "markdown": stem.with_name(base + " - Notes.md"),
+        "project": stem.with_name(base + " - Project.json"),
+        "packet": stem.with_name(base + " - Claude.zip"),
+        "assets": stem.with_name(base + " - Assets"),
+    }
 
 
 def format_time(seconds: float, include_ms: bool = False) -> str:
@@ -803,11 +821,11 @@ def write_claude_packet(
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, str]:
     """Write explicit slide-text/discussion artifacts for downstream note generation."""
-    stem = output_path.with_suffix("")
-    markdown_path = stem.with_name(stem.name + " - Claude Notes.md")
-    project_path = stem.with_name(stem.name + " - Project.json")
-    packet_path = stem.with_name(stem.name + " - Claude Packet.zip")
-    assets_dir = stem.with_name(stem.name + " - Claude Assets")
+    paths = claude_output_paths(output_path)
+    markdown_path = paths["markdown"]
+    project_path = paths["project"]
+    packet_path = paths["packet"]
+    assets_dir = paths["assets"]
     slide_assets_dir = assets_dir / "slides"
     slide_assets_dir.mkdir(parents=True, exist_ok=True)
 
