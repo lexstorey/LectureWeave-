@@ -18,6 +18,47 @@ from typing import Any, Callable
 
 ProgressCallback = Callable[[str, int, int, str], None]
 
+
+def default_whisperx_python() -> Path:
+    app_data = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    return app_data / "LectureWeavePlus" / "whisperx-env" / "Scripts" / "python.exe"
+
+
+def inspect_whisperx_environment(python_executable: Path) -> dict[str, Any]:
+    """Return versions and GPU readiness without exposing environment secrets."""
+    if not python_executable.is_file():
+        return {"ready": False, "reason": "Python environment not found"}
+    probe = r'''
+import json
+try:
+    import torch, whisperx
+    result = {
+        "ready": True,
+        "torch": torch.__version__,
+        "cuda_build": torch.version.cuda,
+        "cuda_available": bool(torch.cuda.is_available()),
+        "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "",
+    }
+except Exception as exc:
+    result = {"ready": False, "reason": f"{type(exc).__name__}: {exc}"}
+print(json.dumps(result))
+'''
+    try:
+        result = subprocess.run(
+            [str(python_executable), "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if result.returncode == 0 and lines:
+            return json.loads(lines[-1])
+        detail = (result.stderr or result.stdout or "WhisperX check failed").strip()
+        return {"ready": False, "reason": detail[-500:]}
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        return {"ready": False, "reason": str(exc)}
+
 HELPER_SOURCE = r'''
 import json, os, sys
 from pathlib import Path
@@ -45,19 +86,7 @@ output_path.write_text(
 
 
 def whisperx_environment_ready(python_executable: Path) -> bool:
-    if not python_executable.is_file():
-        return False
-    try:
-        result = subprocess.run(
-            [str(python_executable), "-c", "import whisperx"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        return result.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
+    return bool(inspect_whisperx_environment(python_executable).get("ready"))
 
 
 def enhance_with_whisperx(

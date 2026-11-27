@@ -75,8 +75,7 @@ def save_huggingface_token(token: str) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
-def load_huggingface_token() -> str:
-    """Return the saved token, falling back to the legacy HF_TOKEN variable."""
+def _load_credential_token() -> str:
     try:
         library = _advapi32()
         pointer = PCREDENTIALW()
@@ -97,7 +96,19 @@ def load_huggingface_token() -> str:
     except OSError:
         if os.name == "nt":
             raise
-    return os.environ.get("HF_TOKEN", "").strip()
+    return ""
+
+
+def load_huggingface_token() -> str:
+    """Return the saved token, falling back to the legacy HF_TOKEN variable."""
+    return _load_credential_token() or os.environ.get("HF_TOKEN", "").strip()
+
+
+def huggingface_token_source() -> str:
+    """Return ``credential``, ``environment`` or an empty string."""
+    if _load_credential_token():
+        return "credential"
+    return "environment" if os.environ.get("HF_TOKEN", "").strip() else ""
 
 
 def delete_huggingface_token() -> bool:

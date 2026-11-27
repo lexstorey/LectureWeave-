@@ -5,13 +5,37 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from whisperx_bridge import enhance_with_whisperx, whisperx_environment_ready
+from whisperx_bridge import (
+    default_whisperx_python,
+    enhance_with_whisperx,
+    inspect_whisperx_environment,
+    whisperx_environment_ready,
+)
 
 
 class WhisperXBridgeTests(unittest.TestCase):
+    def test_default_environment_uses_the_private_app_folder(self):
+        self.assertEqual(default_whisperx_python().name.lower(), "python.exe")
+        self.assertIn("LectureWeavePlus", str(default_whisperx_python()))
+
     def test_missing_environment_is_not_ready(self):
         with tempfile.TemporaryDirectory() as folder:
             self.assertFalse(whisperx_environment_ready(Path(folder) / "python.exe"))
+
+    def test_environment_inspection_reports_cuda_details(self):
+        with tempfile.TemporaryDirectory() as folder:
+            python = Path(folder) / "python.exe"
+            python.touch()
+            with patch("whisperx_bridge.subprocess.run") as run:
+                run.return_value.returncode = 0
+                run.return_value.stdout = (
+                    '{"ready": true, "torch": "2.8.0+cu128", '
+                    '"cuda_build": "12.8", "cuda_available": true, "gpu": "RTX"}\n'
+                )
+                result = inspect_whisperx_environment(python)
+            self.assertTrue(result["ready"])
+            self.assertTrue(result["cuda_available"])
+            self.assertEqual(result["gpu"], "RTX")
 
     def test_token_is_only_passed_in_the_child_environment(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -16,7 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from PySide6.QtCore import QProcess, QThread, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import QProcess, QSettings, QThread, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices, QDragEnterEvent, QDropEvent, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -51,10 +51,16 @@ from content_enrichment import (
 )
 from credential_store import (
     delete_huggingface_token,
+    huggingface_token_source,
     load_huggingface_token,
     save_huggingface_token,
 )
-from whisperx_bridge import enhance_with_whisperx, whisperx_environment_ready
+from whisperx_bridge import (
+    default_whisperx_python,
+    enhance_with_whisperx,
+    inspect_whisperx_environment,
+    whisperx_environment_ready,
+)
 
 from lecture_to_docx import (
     align_segments,
@@ -72,7 +78,7 @@ from lecture_to_docx import (
 
 
 APP_NAME = "LectureWeave+"
-APP_VERSION = "0.3.1"
+APP_VERSION = "0.3.2"
 REPOSITORY_URL = "https://github.com/lexstorey/LectureWeave-"
 PURPLE = "#4A148C"
 PURPLE_DARK = "#32105D"
@@ -82,6 +88,7 @@ TEXT = "#26232B"
 BLACKBOARD_VIDEO_COMMAND = 'copy(document.querySelector("video")?.currentSrc)'
 GPU_SETUP_URL = "https://github.com/SYSTRAN/faster-whisper#gpu"
 WHISPERX_SETUP_URL = "https://github.com/m-bain/whisperX"
+_DLL_DIRECTORY_HANDLES: list[tuple[str, object]] = []
 
 
 def model_cache_root() -> Path:
@@ -89,10 +96,40 @@ def model_cache_root() -> Path:
     return app_data / "LectureTranscriptSlides" / "models"
 
 
+def configure_cuda_runtime(python_executable: Path | None = None) -> list[Path]:
+    """Make CUDA/cuDNN DLLs discoverable from the system or WhisperX environment."""
+    if os.name != "nt" or not hasattr(os, "add_dll_directory"):
+        return []
+    candidates: list[Path] = []
+    cuda_path = os.environ.get("CUDA_PATH")
+    if cuda_path:
+        candidates.append(Path(cuda_path) / "bin")
+    candidates.append(Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin"))
+    python_executable = python_executable or default_whisperx_python()
+    if python_executable:
+        candidates.append(
+            python_executable.parent.parent / "Lib" / "site-packages" / "torch" / "lib"
+        )
+    loaded: list[Path] = []
+    existing_handles = {path for path, _handle in _DLL_DIRECTORY_HANDLES}
+    for folder in candidates:
+        if not folder.is_dir() or str(folder) in existing_handles:
+            continue
+        try:
+            handle = os.add_dll_directory(str(folder))
+            _DLL_DIRECTORY_HANDLES.append((str(folder), handle))
+            existing_handles.add(str(folder))
+            loaded.append(folder)
+        except OSError:
+            continue
+    return loaded
+
+
 def missing_cuda_runtime_libraries() -> list[str]:
     """Return required Faster Whisper CUDA libraries that Windows cannot load."""
     if os.name != "nt":
         return []
+    configure_cuda_runtime()
     missing: list[str] = []
     for name in ("cublas64_12.dll", "cudnn64_9.dll"):
         try:
@@ -759,6 +796,52 @@ class ReviewDialog(QDialog):
         super().accept()
 
 
+class WhisperXStatusThread(QThread):
+    completed = Signal(object)
+
+    def __init__(self, python_path: Path) -> None:
+        super().__init__()
+        self.python_path = python_path
+
+    def run(self) -> None:
+        self.completed.emit(inspect_whisperx_environment(self.python_path))
+
+
+class HuggingFaceAccessThread(QThread):
+    completed = Signal(bool, str)
+
+    def __init__(self, token: str) -> None:
+        super().__init__()
+        self.token = token
+
+    def run(self) -> None:
+        url = (
+            "https://huggingface.co/pyannote/speaker-diarization-community-1/"
+            "resolve/main/config.yaml"
+        )
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "User-Agent": f"LectureWeavePlus/{APP_VERSION}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                if response.status == 200:
+                    self.completed.emit(True, "Speaker model access confirmed")
+                    return
+            self.completed.emit(False, "Hugging Face returned an unexpected response")
+        except urllib.error.HTTPError as exc:
+            if exc.code in {401, 403}:
+                detail = "Token rejected or pyannote model terms have not been accepted"
+            else:
+                detail = f"Hugging Face returned HTTP {exc.code}"
+            self.completed.emit(False, detail)
+        except Exception as exc:
+            self.completed.emit(False, f"Could not reach Hugging Face: {exc}")
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -771,6 +854,9 @@ class MainWindow(QMainWindow):
         self.worker: ProcessingThread | None = None
         self.update_worker: UpdateCheckThread | None = None
         self.update_download_worker: UpdateDownloadThread | None = None
+        self.whisperx_status_worker: WhisperXStatusThread | None = None
+        self.hf_access_worker: HuggingFaceAccessThread | None = None
+        self.settings = QSettings("LectureWeave", "LectureWeavePlus")
         self.last_output: Path | None = None
 
         self.setStyleSheet(
@@ -798,6 +884,7 @@ class MainWindow(QMainWindow):
             """
         )
         self.build_interface()
+        QTimer.singleShot(0, self.refresh_whisperx_status)
 
     @staticmethod
     def card() -> tuple[QFrame, QVBoxLayout]:
@@ -970,36 +1057,69 @@ class MainWindow(QMainWindow):
         self.whisperx_check = QCheckBox(
             "Optional enhanced word alignment and anonymous speakers using an external WhisperX environment"
         )
-        self.whisperx_check.setChecked(False)
+        self.whisperx_check.setChecked(
+            self.settings.value("whisperx/enabled", False, type=bool)
+        )
+        self.whisperx_check.toggled.connect(
+            lambda checked: self.settings.setValue("whisperx/enabled", checked)
+        )
         details_layout.addWidget(self.whisperx_check)
         whisperx_row = QHBoxLayout()
         whisperx_label = self.hint_label("WhisperX")
         whisperx_label.setFixedWidth(72)
-        self.whisperx_edit = QLineEdit(os.environ.get("LECTUREWEAVE_WHISPERX_PYTHON", ""))
+        configured_whisperx = str(
+            os.environ.get("LECTUREWEAVE_WHISPERX_PYTHON")
+            or self.settings.value("whisperx/python", "")
+            or (default_whisperx_python() if default_whisperx_python().is_file() else "")
+        )
+        self.whisperx_edit = QLineEdit(configured_whisperx)
+        self.whisperx_edit.setReadOnly(True)
         self.whisperx_edit.setPlaceholderText("Optional Python executable containing WhisperX")
         choose_whisperx = QPushButton("Choose Python…")
         choose_whisperx.clicked.connect(self.browse_whisperx)
+        install_whisperx = QPushButton("Install / repair")
+        install_whisperx.clicked.connect(self.install_or_repair_whisperx)
         whisperx_row.addWidget(whisperx_label)
         whisperx_row.addWidget(self.whisperx_edit, 1)
         whisperx_row.addWidget(choose_whisperx)
+        whisperx_row.addWidget(install_whisperx)
         details_layout.addLayout(whisperx_row)
+        whisperx_status_row = QHBoxLayout()
+        self.whisperx_status = QLabel("Checking WhisperX setup…")
+        self.whisperx_status.setWordWrap(True)
+        check_whisperx = QPushButton("Check setup")
+        check_whisperx.clicked.connect(self.refresh_whisperx_status)
+        reset_whisperx = QPushButton("Reset path")
+        reset_whisperx.clicked.connect(self.reset_whisperx_path)
+        whisperx_status_row.addSpacing(78)
+        whisperx_status_row.addWidget(self.whisperx_status, 1)
+        whisperx_status_row.addWidget(check_whisperx)
+        whisperx_status_row.addWidget(reset_whisperx)
+        details_layout.addLayout(whisperx_status_row)
         token_row = QHBoxLayout()
         token_label = self.hint_label("HF token")
         token_label.setFixedWidth(72)
         self.hf_token_edit = QLineEdit()
         self.hf_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.hf_token_edit.setPlaceholderText("Paste a Hugging Face read token beginning with hf_")
-        save_token = QPushButton("Save token")
-        save_token.clicked.connect(self.save_hf_token)
-        remove_token = QPushButton("Remove")
+        self.save_token_button = QPushButton("Save / replace")
+        self.save_token_button.clicked.connect(self.save_hf_token)
+        test_token = QPushButton("Test access")
+        test_token.clicked.connect(self.test_hf_token_access)
+        remove_token = QPushButton("Reset token")
         remove_token.clicked.connect(self.remove_hf_token)
         token_row.addWidget(token_label)
         token_row.addWidget(self.hf_token_edit, 1)
-        token_row.addWidget(save_token)
+        token_row.addWidget(self.save_token_button)
+        token_row.addWidget(test_token)
         token_row.addWidget(remove_token)
         details_layout.addLayout(token_row)
-        self.hf_token_status = self.hint_label("")
-        details_layout.addWidget(self.hf_token_status)
+        token_status_row = QHBoxLayout()
+        token_status_row.addSpacing(78)
+        self.hf_token_status = QLabel("")
+        self.hf_token_status.setWordWrap(True)
+        token_status_row.addWidget(self.hf_token_status, 1)
+        details_layout.addLayout(token_status_row)
         self.refresh_hf_token_status()
         details_layout.addWidget(
             self.hint_label(
@@ -1142,18 +1262,137 @@ class MainWindow(QMainWindow):
         )
         if selected:
             self.whisperx_edit.setText(selected)
+            self.settings.setValue("whisperx/python", selected)
             self.whisperx_check.setChecked(True)
+            self.refresh_whisperx_status()
+
+    @staticmethod
+    def set_setup_status(label: QLabel, text: str, state: str) -> None:
+        colours = {
+            "success": "#267A3E",
+            "warning": "#9A6200",
+            "error": "#B3261E",
+            "checking": "#68626E",
+        }
+        label.setText(text)
+        label.setStyleSheet(
+            f"color: {colours.get(state, colours['checking'])}; font-weight: 600;"
+        )
+
+    def refresh_whisperx_status(self) -> None:
+        if self.whisperx_status_worker and self.whisperx_status_worker.isRunning():
+            return
+        value = self.whisperx_edit.text().strip().strip('"')
+        if not value and default_whisperx_python().is_file():
+            value = str(default_whisperx_python())
+            self.whisperx_edit.setText(value)
+        if not value:
+            self.set_setup_status(
+                self.whisperx_status,
+                "WhisperX is not installed. Use Install / repair for guided setup.",
+                "warning",
+            )
+            return
+        python_path = Path(value).resolve()
+        self.set_setup_status(self.whisperx_status, "Checking WhisperX and GPU…", "checking")
+        self.whisperx_status_worker = WhisperXStatusThread(python_path)
+        self.whisperx_status_worker.completed.connect(
+            lambda result, path=python_path: self.whisperx_status_complete(path, result)
+        )
+        self.whisperx_status_worker.finished.connect(self.whisperx_status_worker_finished)
+        self.whisperx_status_worker.start()
+
+    def whisperx_status_worker_finished(self) -> None:
+        if self.whisperx_status_worker:
+            self.whisperx_status_worker.deleteLater()
+        self.whisperx_status_worker = None
+
+    def whisperx_status_complete(self, python_path: Path, result: dict) -> None:
+        if not result.get("ready"):
+            self.set_setup_status(
+                self.whisperx_status,
+                f"WhisperX needs repair: {result.get('reason', 'environment check failed')}",
+                "error",
+            )
+            return
+        self.settings.setValue("whisperx/python", str(python_path))
+        self.whisperx_edit.setText(str(python_path))
+        self.whisperx_check.setChecked(True)
+        if result.get("cuda_available"):
+            configure_cuda_runtime(python_path)
+            detail = (
+                f"✓ WhisperX ready · {result.get('gpu', 'NVIDIA GPU')} · "
+                f"CUDA {result.get('cuda_build', '?')} · PyTorch {result.get('torch', '?')}"
+            )
+            self.set_setup_status(self.whisperx_status, detail, "success")
+        else:
+            self.set_setup_status(
+                self.whisperx_status,
+                "WhisperX is installed but GPU acceleration is unavailable; processing will use CPU.",
+                "warning",
+            )
+
+    def reset_whisperx_path(self) -> None:
+        self.settings.remove("whisperx/python")
+        standard = default_whisperx_python()
+        self.whisperx_edit.setText(str(standard) if standard.is_file() else "")
+        self.refresh_whisperx_status()
+
+    def install_or_repair_whisperx(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            APP_NAME,
+            "Install or repair WhisperX automatically?\n\n"
+            "LectureWeave+ will open a PowerShell setup window, create a private Python 3.12 "
+            "environment and download WhisperX plus CUDA-enabled PyTorch from their official "
+            "package servers. Allow several gigabytes of disk space.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        script = resource_path("assets/install_whisperx.ps1")
+        if not script.is_file():
+            QMessageBox.critical(self, APP_NAME, "The bundled WhisperX setup script is missing.")
+            return
+        started, _process_id = QProcess.startDetached(
+            "powershell.exe",
+            ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+            str(script.parent),
+        )
+        if not started:
+            QMessageBox.critical(self, APP_NAME, "The WhisperX setup window could not be opened.")
+            return
+        self.set_setup_status(
+            self.whisperx_status,
+            "WhisperX setup is running in PowerShell. Click Check setup when it finishes.",
+            "checking",
+        )
 
     def refresh_hf_token_status(self) -> None:
         try:
-            saved = bool(load_huggingface_token())
+            source = huggingface_token_source()
         except OSError:
-            saved = False
-        self.hf_token_status.setText(
-            "Hugging Face token is saved and will be reused automatically."
-            if saved
-            else "No Hugging Face token saved. Word alignment still works; speaker labels require one."
-        )
+            source = ""
+        if source == "credential":
+            self.set_setup_status(
+                self.hf_token_status,
+                "✓ Token saved securely in Windows Credential Manager · access not yet tested",
+                "success",
+            )
+            self.save_token_button.setText("Replace token")
+        elif source == "environment":
+            self.set_setup_status(
+                self.hf_token_status,
+                "✓ Token available from the legacy HF_TOKEN environment variable",
+                "success",
+            )
+            self.save_token_button.setText("Save securely")
+        else:
+            self.set_setup_status(
+                self.hf_token_status,
+                "No token saved · word alignment works, but speaker labels require a token",
+                "warning",
+            )
+            self.save_token_button.setText("Save token")
 
     def save_hf_token(self) -> None:
         token = self.hf_token_edit.text().strip()
@@ -1171,7 +1410,53 @@ class MainWindow(QMainWindow):
             "You will not need to enter it again.",
         )
 
+    def test_hf_token_access(self) -> None:
+        if self.hf_access_worker and self.hf_access_worker.isRunning():
+            return
+        try:
+            token = load_huggingface_token()
+        except OSError as exc:
+            self.set_setup_status(self.hf_token_status, f"Token could not be read: {exc}", "error")
+            return
+        if not token:
+            self.set_setup_status(
+                self.hf_token_status,
+                "No token is saved. Paste a read token and choose Save token.",
+                "warning",
+            )
+            return
+        self.set_setup_status(self.hf_token_status, "Testing pyannote model access…", "checking")
+        self.hf_access_worker = HuggingFaceAccessThread(token)
+        self.hf_access_worker.completed.connect(self.hf_token_access_complete)
+        self.hf_access_worker.finished.connect(self.hf_access_worker_finished)
+        self.hf_access_worker.start()
+
+    def hf_access_worker_finished(self) -> None:
+        if self.hf_access_worker:
+            self.hf_access_worker.deleteLater()
+        self.hf_access_worker = None
+
+    def hf_token_access_complete(self, success: bool, detail: str) -> None:
+        if success:
+            self.set_setup_status(
+                self.hf_token_status,
+                "✓ Token valid · pyannote speaker-model access confirmed",
+                "success",
+            )
+        else:
+            self.set_setup_status(
+                self.hf_token_status,
+                f"Token needs attention: {detail}. Replace or reset it.",
+                "error",
+            )
+
     def remove_hf_token(self) -> None:
+        if QMessageBox.question(
+            self,
+            APP_NAME,
+            "Reset the saved Hugging Face token? Speaker detection will be unavailable until a new token is saved.",
+        ) != QMessageBox.StandardButton.Yes:
+            return
         try:
             removed = delete_huggingface_token()
         except OSError as exc:

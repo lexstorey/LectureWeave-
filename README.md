@@ -27,6 +27,10 @@ machine-generated transcript text and optional chat comments.
 - A masked Hugging Face token field backed by Windows Credential Manager, so
   speaker access can be saved once without placing the token in settings files
   or project output
+- Automatic WhisperX environment discovery, remembered custom paths, live
+  CUDA/GPU readiness feedback, token access testing, and guided install/repair
+- Automatic reuse of CUDA and cuDNN libraries from the private WhisperX
+  environment, allowing built-in Faster Whisper and WhisperX to share the GPU
 - Cached transcripts for faster regeneration
 - CPU fallback and NVIDIA CUDA acceleration when available
 - Live slide-scan, model-download, transcription and export progress with ETA
