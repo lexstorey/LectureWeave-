@@ -83,7 +83,7 @@ from lecture_to_docx import (
 
 
 APP_NAME = "LectureWeave+"
-APP_VERSION = "0.4.3"
+APP_VERSION = "0.4.4"
 REPOSITORY_URL = "https://github.com/lexstorey/LectureWeave-"
 PURPLE = "#4A148C"
 PURPLE_DARK = "#32105D"
@@ -292,13 +292,57 @@ class SignalWriter(io.TextIOBase):
         while "\n" in self.buffer:
             line, self.buffer = self.buffer.split("\n", 1)
             if line.strip():
-                self.signal.emit(line.strip())
+                self._emit(line.strip())
         return len(value)
+
+    def _emit(self, line: str) -> None:
+        # A library that cached this writer during an earlier run can still
+        # write to it after that run's thread is gone; drop those lines.
+        try:
+            self.signal.emit(line)
+        except RuntimeError:
+            pass
 
     def flush(self) -> None:
         if self.buffer.strip():
-            self.signal.emit(self.buffer.strip())
-        self.buffer = ""
+            self._emit(self.buffer.strip())
+            self.buffer = ""
+
+
+def route_library_logging(writer: io.TextIOBase) -> None:
+    """Send third-party log handlers to this run's log, and quieten RapidOCR.
+
+    RapidOCR creates its console handler once, bound to whatever stdout was
+    at the time: the first run's log writer. Later runs must re-point it.
+    """
+    import logging
+
+    rapidocr_logger = logging.getLogger("RapidOCR")
+    if not rapidocr_logger.handlers:
+        # RapidOCR only adds its own (verbose) handler when none exists.
+        quiet_handler = logging.StreamHandler(writer)
+        quiet_handler.setFormatter(logging.Formatter("RapidOCR %(levelname)s: %(message)s"))
+        quiet_handler.setLevel(logging.WARNING)
+        rapidocr_logger.addHandler(quiet_handler)
+        rapidocr_logger.propagate = False
+
+    loggers = [logging.getLogger()] + [
+        item for item in logging.Logger.manager.loggerDict.values()
+        if isinstance(item, logging.Logger)
+    ]
+    for logger in loggers:
+        quiet = logger.name.lower().startswith("rapidocr")
+        if quiet:
+            logger.setLevel(logging.WARNING)
+        for handler in logger.handlers:
+            if quiet:
+                # RapidOCR resets its logger level on every start, but not the
+                # handler's, so the handler is what keeps routine lines out.
+                handler.setLevel(logging.WARNING)
+            if isinstance(handler, logging.StreamHandler) and isinstance(
+                getattr(handler, "stream", None), SignalWriter
+            ):
+                handler.setStream(writer)
 
 
 class ProcessingCancelled(RuntimeError):
@@ -526,6 +570,7 @@ class ProcessingThread(QThread):
         writer = SignalWriter(self.log)
         try:
             with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
+                route_library_logging(writer)
                 self.raise_if_cancelled()
                 self.status.emit(f"Preparing the Whisper {self.model_name} speech model…")
                 prepare_whisper_model(
@@ -562,6 +607,7 @@ class ProcessingThread(QThread):
                     deck_summaries.append({"label": label, "name": deck_path.name, "pages": len(pages)})
                 self.status.emit("Extracting searchable text from the slides…")
                 run_slide_ocr(slides, self.report_progress)
+                route_library_logging(writer)
                 if deck_pages:
                     match_deck_pages(slides, deck_pages)
                     for label in sorted(unreliable_deck_text(slides)):
@@ -1331,6 +1377,7 @@ class MainWindow(QMainWindow):
         output_layout.addWidget(self.section_label("Output"))
         output_layout.addWidget(self.field_label("Title"))
         self.title_edit = QLineEdit()
+        self.title_edit.textEdited.connect(lambda _text: self.sync_output_to_title())
         output_layout.addWidget(self.title_edit)
         output_layout.addWidget(self.field_label("Create"))
         self.pack_check = QCheckBox("Claude pack (.md) — full transcript by slide, for your study Claude")
@@ -1345,9 +1392,10 @@ class MainWindow(QMainWindow):
         output_layout.addWidget(self.pack_check)
         output_layout.addWidget(self.docx_check)
         output_layout.addWidget(self.zip_check)
-        output_layout.addWidget(self.field_label("Save as"))
+        output_layout.addWidget(self.field_label("Save as (named after the title unless you change it)"))
         output_row = QHBoxLayout()
         self.output_edit = QLineEdit()
+        self.output_edit.textEdited.connect(self.output_edited_by_user)
         choose_output = QPushButton("Choose…")
         choose_output.clicked.connect(self.browse_output)
         output_row.addWidget(self.output_edit, 1)
@@ -1619,12 +1667,52 @@ class MainWindow(QMainWindow):
 
     def set_video(self, value: str) -> None:
         path = Path(value).expanduser().resolve()
+        previous = self.video_edit.text().strip().strip('"')
+        if (
+            previous
+            and Path(previous) != path
+            and self.comments_edit.toPlainText().strip()
+        ):
+            answer = QMessageBox.question(
+                self,
+                APP_NAME,
+                "The chat box still holds the comments pasted for the previous video.\n\n"
+                "Clear them for this new recording?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.comments_edit.clear()
         self.video_edit.setText(str(path))
+        self.output_follows_title = True
         self.title_edit.setText(f"{path.stem} Transcript and Slides")
-        self.output_edit.setText(str(path.with_name(f"{path.stem} Transcript and Slides.docx")))
+        self.sync_output_to_title()
         self.status.setText(
             "Video selected. Paste chat comments if you have them, then create the document."
         )
+
+    @staticmethod
+    def safe_file_stem(text: str) -> str:
+        stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', " ", text)
+        stem = re.sub(r"\s+", " ", stem).strip(" .")
+        return stem[:120].rstrip(" .") or "Lecture"
+
+    def sync_output_to_title(self) -> None:
+        """Name the output files after the title until the user picks a name."""
+        if not getattr(self, "output_follows_title", True):
+            return
+        video = self.video_edit.text().strip().strip('"')
+        current = self.output_edit.text().strip().strip('"')
+        folder = Path(current).parent if current else (Path(video).parent if video else None)
+        if folder is None:
+            return
+        stem = self.safe_file_stem(self.title_edit.text().strip() or "Lecture")
+        self.output_edit.blockSignals(True)
+        self.output_edit.setText(str(folder / f"{stem}.docx"))
+        self.output_edit.blockSignals(False)
+
+    def output_edited_by_user(self, _text: str = "") -> None:
+        self.output_follows_title = False
 
     def browse_output(self) -> None:
         initial = self.output_edit.text().strip() or str(Path.cwd() / "Transcript.docx")
@@ -1638,6 +1726,7 @@ class MainWindow(QMainWindow):
             if not selected.lower().endswith(".docx"):
                 selected += ".docx"
             self.output_edit.setText(selected)
+            self.output_follows_title = False
 
     def browse_deck(self) -> None:
         selected, _ = QFileDialog.getOpenFileNames(
