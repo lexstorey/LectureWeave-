@@ -52,11 +52,12 @@ class NamingTests(unittest.TestCase):
 
     def test_output_name_follows_title_until_changed(self):
         window = gui.MainWindow()
-        window.set_video(str(Path("/tmp/lectures/7bec7b11_261127T075842398Z.mp4")))
+        video = Path("/tmp/lectures/7bec7b11_261127T075842398Z.mp4").resolve()
+        window.set_video(str(video))
         self.assertTrue(window.output_edit.text().endswith("7bec7b11_261127T075842398Z Transcript and Slides.docx"))
         window.title_edit.setText("Recording 2")
         window.title_edit.textEdited.emit("Recording 2")
-        self.assertEqual(Path("/tmp/lectures/Recording 2.docx"), Path(window.output_edit.text()))
+        self.assertEqual(video.parent / "Recording 2.docx", Path(window.output_edit.text()))
         window.title_edit.setText("Day 5: part 2?")
         window.title_edit.textEdited.emit("Day 5: part 2?")
         self.assertEqual("Day 5 part 2.docx", Path(window.output_edit.text()).name)
