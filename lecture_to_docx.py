@@ -41,14 +41,14 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-LEGAL_PROMPT = (
-    "Australian law university lecture. Terminology may include court based ADR, "
-    "alternative dispute resolution, mediation, conciliation, arbitration, NT Local Court, "
-    "Northern Territory Civil and Administrative Tribunal, NTCAT, Legal Profession Act, "
-    "Anti-Discrimination Act, Health and Community Services Complaints Act, Work Health and "
-    "Safety Act, Burial and Cremation Act, interlocutory, jurisdiction, legislation, statute, "
-    "tribunal, registrar, mediator and conciliator."
+# A neutral prompt: subject-specific terms come from the slides and the user's
+# glossary as hotwords, so no single unit's vocabulary is forced on every lecture.
+DEFAULT_PROMPT = (
+    "A university lecture. Names, acronyms, legislation, cases and specialist "
+    "terms are spelled correctly, with full punctuation."
 )
+# Bump when transcription settings change so stale cached transcripts are not reused.
+TRANSCRIPTION_SETTINGS_VERSION = "2"
 
 ProgressCallback = Callable[[str, int, int, str], None]
 def format_time(seconds: float, include_ms: bool = False) -> str:
@@ -645,6 +645,7 @@ def transcribe(
     model_cache: Path | None = None,
     progress_callback: ProgressCallback | None = None,
     hotwords: str = "",
+    initial_prompt: str = DEFAULT_PROMPT,
 ) -> tuple[list[dict[str, Any]], str]:
     # PyAV 19 removed the ``metadata_errors`` keyword while some Faster Whisper
     # releases still pass it.  Keep the tool usable with either PyAV API.
@@ -668,7 +669,6 @@ def transcribe(
     models_dir = model_cache or (work_dir / "models")
     models_dir.mkdir(parents=True, exist_ok=True)
     model_path = prepare_whisper_model(model_name, models_dir, progress_callback)
-    initial_prompt = LEGAL_PROMPT
     attempts = [("cuda", "float16"), ("cpu", "int8")]
     last_error: Exception | None = None
     for device, compute_type in attempts:
@@ -700,8 +700,12 @@ def transcribe(
                 task="transcribe",
                 beam_size=5,
                 vad_filter=True,
-                condition_on_previous_text=True,
-                initial_prompt=initial_prompt,
+                # Long recordings conditioned on previous text can fall into
+                # repetition loops; skipping hallucinated speech in silences
+                # guards against the other common long-form failure.
+                condition_on_previous_text=False,
+                hallucination_silence_threshold=2.0,
+                initial_prompt=initial_prompt or None,
                 hotwords=safe_hotwords or None,
                 word_timestamps=True,
             )

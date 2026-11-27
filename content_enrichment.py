@@ -196,21 +196,157 @@ def run_slide_ocr(
         progress_callback("ocr", len(slides), len(slides), "Slide text extraction complete.")
 
 
-def transcription_vocabulary(slides: list[dict[str, Any]], maximum_characters: int = 1200) -> str:
-    """Build a restrained terminology list from slide text for Whisper hotwords."""
-    candidates: list[str] = []
-    seen: set[str] = set()
-    for slide in slides:
-        text = str(slide.get("slide_text") or slide.get("deck_text") or "")
-        for token in re.findall(
-            r"\b[A-Za-z][A-Za-z’'\-]{3,}(?:\s+[A-Z][A-Za-z’'\-]{2,}){0,3}\b", text
-        ):
-            cleaned = re.sub(r"\s+", " ", token).strip(" -")
-            key = cleaned.casefold()
-            if key in seen or key in {"this", "that", "with", "from", "have", "will"}:
-                continue
-            seen.add(key)
-            candidates.append(cleaned)
-    result = ", ".join(candidates)
-    return result[:maximum_characters].rsplit(",", 1)[0] if len(result) > maximum_characters else result
+_CONNECTORS = {"of", "and", "for", "the", "on", "in", "v", "de", "du", "von", "van", "&"}
 
+
+def _significant_lines(slides: list[dict[str, Any]]) -> list[list[str]]:
+    """Return each distinct slide's lines, minus template text repeated on most slides."""
+    distinct: dict[Any, str] = {}
+    for slide in slides:
+        text = str(slide.get("deck_text") or slide.get("slide_text") or "")
+        key = slide.get("canonical_index", text) or text
+        distinct.setdefault(key, text)
+    slide_lines = [
+        [re.sub(r"\s+", " ", line).strip() for line in text.splitlines() if line.strip()]
+        for text in distinct.values()
+    ]
+    if len(slide_lines) >= 4:
+        frequency: dict[str, int] = {}
+        for lines in slide_lines:
+            for line in set(line.casefold() for line in lines):
+                frequency[line] = frequency.get(line, 0) + 1
+        limit = len(slide_lines) * 0.5
+        slide_lines = [
+            [line for line in lines if frequency[line.casefold()] <= limit]
+            for lines in slide_lines
+        ]
+    return slide_lines
+
+
+def _line_terms(line: str) -> list[tuple[str, int]]:
+    """Extract (term, base score) pairs from one slide line."""
+    terms: list[tuple[str, int]] = []
+    for chunk in re.split(r"[,:;()\[\]/|•·–—>!?\"“”]|\.\s", line):
+        terms.extend(_chunk_terms(chunk))
+    return terms
+
+
+def _chunk_terms(chunk: str) -> list[tuple[str, int]]:
+    from common_words import COMMON_WORDS
+
+    terms: list[tuple[str, int]] = []
+    tokens = re.findall(r"[^\W_][\w’'\-]*|&", chunk)
+    while tokens and tokens[0].casefold() in {"the", "a", "an"}:
+        tokens = tokens[1:]
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        stripped = token.strip("’'-")
+        is_capital = bool(stripped) and stripped[0].isupper()
+        if is_capital:
+            phrase = [stripped]
+            look = index + 1
+            while look < len(tokens):
+                nxt = tokens[look].strip("’'-")
+                if nxt and nxt[0].isupper():
+                    phrase.append(nxt)
+                    look += 1
+                elif (
+                    nxt.casefold() in _CONNECTORS
+                    and look + 1 < len(tokens)
+                    and tokens[look + 1][:1].isupper()
+                ):
+                    phrase.append(nxt)
+                    look += 1
+                elif re.fullmatch(r"(1[5-9]|20)\d\d", nxt) and phrase[-1] == "Act":
+                    phrase.append(nxt)
+                    look += 1
+                else:
+                    break
+            content = [word for word in phrase if word.casefold() not in _CONNECTORS]
+            if len(content) >= 2:
+                terms.append((" ".join(phrase), 3))
+                index = look
+                continue
+        lowered = stripped.casefold()
+        if len(stripped) < 2 or lowered in COMMON_WORDS or stripped.isdigit():
+            index += 1
+            continue
+        if re.fullmatch(r"[A-Z][A-Z0-9&]{1,}[a-z]?", stripped):
+            terms.append((stripped, 3))
+        elif any(ord(character) > 127 for character in stripped):
+            terms.append((stripped, 3))
+        elif is_capital and len(stripped) >= 4 and index > 0:
+            terms.append((stripped, 2))
+        elif is_capital and len(stripped) >= 5:
+            terms.append((stripped, 1))
+        elif len(stripped) >= 9 and stripped.isalpha():
+            terms.append((stripped, 1))
+        index += 1
+    return terms
+
+
+def load_glossary(path: Path | None) -> list[str]:
+    """Read a user glossary: one term per line; blank lines and # comments ignored."""
+    if not path:
+        return []
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig")
+    except OSError:
+        return []
+    terms: list[str] = []
+    for line in text.splitlines():
+        term = re.sub(r"\s+", " ", line.split("#", 1)[0]).strip(" ,;")
+        if term and term.casefold() not in {existing.casefold() for existing in terms}:
+            terms.append(term)
+    return terms
+
+
+def transcription_vocabulary(
+    slides: list[dict[str, Any]],
+    maximum_characters: int = 1200,
+    glossary: list[str] | None = None,
+) -> str:
+    """Rank the terms Whisper is most likely to mishear, best first.
+
+    Glossary terms always come first. Slide terms are ranked by type
+    (acronyms, multi-word names and words with diacritics above single
+    capitalised words) and by how many distinct slides repeat them. Template
+    lines that appear on most slides and common English words are ignored,
+    because Whisper's hotword budget is small (about 96 tokens).
+    """
+    scores: dict[str, list[Any]] = {}
+    order = 0
+    for lines in _significant_lines(slides):
+        seen_here: set[str] = set()
+        for line in lines:
+            for term, base in _line_terms(line):
+                key = term.casefold()
+                if key not in scores:
+                    scores[key] = [term, base, 0, order]
+                    order += 1
+                entry = scores[key]
+                entry[1] = max(entry[1], base)
+                if key not in seen_here:
+                    entry[2] += 1
+                    seen_here.add(key)
+    ranked = sorted(
+        scores.values(),
+        key=lambda entry: (-(entry[1] + min(entry[2] - 1, 3)), entry[3]),
+    )
+    candidates = list(glossary or [])
+    known = {term.casefold() for term in candidates}
+    for term, _base, _count, _order in ranked:
+        if term.casefold() in known:
+            continue
+        # Skip single words already covered by a chosen multi-word phrase.
+        if " " not in term and any(
+            term.casefold() in chosen.casefold().split() for chosen in candidates if " " in chosen
+        ):
+            continue
+        candidates.append(term)
+        known.add(term.casefold())
+    result = ", ".join(candidates)
+    if len(result) > maximum_characters:
+        result = result[:maximum_characters].rsplit(",", 1)[0]
+    return result
