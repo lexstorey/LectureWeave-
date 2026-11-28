@@ -65,7 +65,9 @@ reading copy with slide images.
 - Automatic resume and repair of incomplete Whisper model downloads
 - Guided one-time model downloads with clear Download, Turbo and Cancel choices
 - Model-specific transcript caching, so a Turbo transcript is never reused as Large-v3 output
-- One-click, checksum-verified updates from official GitHub releases
+- Automatic, checksum-verified updates from official GitHub releases: new
+  versions download in the background and install invisibly when you click
+  the update button or close the app (can be turned off in Settings)
 
 ## Installing and updating
 
@@ -74,10 +76,12 @@ Start-menu and optional desktop shortcuts. Installing a newer release over an
 existing copy updates the application while leaving locally cached models and
 transcripts in place.
 
-Inside LectureWeave+, select **Check for updates** to compare the installed
-version with the latest GitHub release. When an update is available, the app
-downloads the official installer, verifies its published SHA-256 digest, closes,
-installs the update and reopens automatically.
+LectureWeave+ checks for updates a few seconds after it starts. A newer
+release is downloaded in the background and its published SHA-256 digest is
+verified; a gold "Update ready" button then appears in the header. Click it to
+restart into the new version, or simply close the app and the update installs
+itself without any installer windows. **Check for updates** in Settings does the
+same on demand, and the automatic check can be turned off there.
 The portable ZIP is available for users who do not want an installer, but it
 must be extracted fully before the EXE is opened.
 

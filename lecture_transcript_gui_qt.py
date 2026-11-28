@@ -84,7 +84,7 @@ from lecture_to_docx import (
 
 
 APP_NAME = "LectureWeave+"
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.5.1"
 REPOSITORY_URL = "https://github.com/lexstorey/LectureWeave-"
 PURPLE = "#4A148C"
 PURPLE_DARK = "#32105D"
@@ -406,6 +406,7 @@ class UpdateDownloadThread(QThread):
         super().__init__()
         self.url = url
         self.expected_digest = expected_digest
+        self.tag = tag
         safe_tag = re.sub(r"[^0-9A-Za-z._-]+", "-", tag).strip("-") or "latest"
         self.destination = Path(tempfile.gettempdir()) / f"LectureWeavePlus-{safe_tag}-Setup.exe"
 
@@ -1155,6 +1156,8 @@ class MainWindow(QMainWindow):
             QPushButton#segment:checked {{ background: white; color: {PURPLE_DARK}; font-weight: 600; }}
             QPushButton#headerButton {{ background: transparent; color: white; border: 1px solid rgba(255, 255, 255, 90); padding: 8px 16px; }}
             QPushButton#headerButton:hover {{ background: rgba(255, 255, 255, 30); }}
+            QPushButton#updateReady {{ background: #F4AD45; color: {PURPLE_DARK}; border: none; font-weight: 600; padding: 8px 16px; }}
+            QPushButton#updateReady:hover {{ background: #F7BF67; }}
             QPushButton:disabled {{ color: #9B96A0; background: #EEECEF; }}
             QPushButton#quiet:disabled, QPushButton#segment:disabled {{ color: #A9A3AF; background: transparent; }}
             QCheckBox {{ color: {TEXT}; font-family: 'Segoe UI'; font-size: 9pt; spacing: 8px; }}
@@ -1164,6 +1167,14 @@ class MainWindow(QMainWindow):
         )
         self.build_interface()
         QTimer.singleShot(0, self.refresh_whisperx_status)
+        self.update_auto = False
+        self.pending_update: tuple[str, str] | None = None
+        if "--updated" in sys.argv:
+            QTimer.singleShot(
+                0, lambda: self.status.setText(f"LectureWeave+ was updated to {APP_VERSION}.")
+            )
+        if self.settings.value("updates/auto", True, type=bool):
+            QTimer.singleShot(4000, self.auto_check_for_updates)
 
     @staticmethod
     def card() -> tuple[QFrame, QVBoxLayout]:
@@ -1215,6 +1226,11 @@ class MainWindow(QMainWindow):
         title_block.addWidget(subtitle)
         header_layout.addLayout(title_block)
         header_layout.addStretch(1)
+        self.update_ready_button = QPushButton("Update ready · restart to install")
+        self.update_ready_button.setObjectName("updateReady")
+        self.update_ready_button.setVisible(False)
+        self.update_ready_button.clicked.connect(lambda: self.install_pending_update(relaunch=True))
+        header_layout.addWidget(self.update_ready_button)
         self.settings_button = QPushButton("Settings")
         self.settings_button.setObjectName("headerButton")
         self.settings_button.setToolTip("WhisperX, speaker labels and updates")
@@ -1569,7 +1585,12 @@ class MainWindow(QMainWindow):
         self.animation_check = QCheckBox("Play the opening animation when LectureWeave+ starts")
         self.sounds_check = QCheckBox("Play sounds (start-up, finished and failed)")
         self.review_check = QCheckBox("Review slides before export (deck numbers, slide text, merges)")
+        self.auto_update_check = QCheckBox(
+            "Check for updates automatically and install them (when you restart or close the app)"
+        )
+        general_layout.addWidget(self.auto_update_check)
         for check, key in (
+            (self.auto_update_check, "updates/auto"),
             (self.animation_check, "ui/startup_animation"),
             (self.sounds_check, "ui/sounds"),
             (self.review_check, "review/enabled"),
@@ -2385,6 +2406,45 @@ class MainWindow(QMainWindow):
         if self.last_output:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.last_output.parent)))
 
+    def auto_check_for_updates(self) -> None:
+        """Quietly check, download and verify a newer release in the background."""
+        if self.pending_update or (self.update_worker and self.update_worker.isRunning()) or (
+            self.update_download_worker and self.update_download_worker.isRunning()
+        ):
+            return
+        self.update_auto = True
+        self.update_worker = UpdateCheckThread(self)
+        self.update_worker.completed.connect(self.update_check_complete)
+        self.update_worker.failed.connect(self.update_check_failed)
+        self.update_worker.start()
+
+    def install_pending_update(self, relaunch: bool) -> bool:
+        if not self.pending_update:
+            return False
+        if self.worker and self.worker.isRunning():
+            QMessageBox.information(
+                self, APP_NAME, "The update will install once the current generation has finished."
+            )
+            return False
+        installer, _tag = self.pending_update
+        if not Path(installer).is_file():
+            self.pending_update = None
+            self.update_ready_button.setVisible(False)
+            return False
+        result = QProcess.startDetached(installer, installer_arguments(relaunch))
+        started = result[0] if isinstance(result, tuple) else bool(result)
+        if not started:
+            return False
+        self.pending_update = None
+        if relaunch:
+            QApplication.instance().quit()
+        return True
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        if self.pending_update and not (self.worker and self.worker.isRunning()):
+            self.install_pending_update(relaunch=False)
+        super().closeEvent(event)
+
     def check_for_updates(self) -> None:
         if self.worker and self.worker.isRunning():
             QMessageBox.information(
@@ -2397,6 +2457,10 @@ class MainWindow(QMainWindow):
             self.update_download_worker and self.update_download_worker.isRunning()
         ):
             return
+        if self.pending_update:
+            self.install_pending_update(relaunch=True)
+            return
+        self.update_auto = False
         self.update_button.setEnabled(False)
         self.status.setText("Checking GitHub for a newer LectureWeave+ release…")
         self.update_worker = UpdateCheckThread(self)
@@ -2410,6 +2474,8 @@ class MainWindow(QMainWindow):
         current = version_key(APP_VERSION)
         if latest <= current:
             self.update_button.setEnabled(True)
+            if self.update_auto:
+                return
             self.status.setText(f"LectureWeave+ {APP_VERSION} is up to date.")
             QMessageBox.information(
                 self,
@@ -2434,6 +2500,10 @@ class MainWindow(QMainWindow):
             self.update_check_failed(str(exc))
             return
 
+        if self.update_auto:
+            self.append_log(f"Downloading LectureWeave+ {tag.lstrip('v')} in the background…")
+            self.start_update_download(download_url, digest, tag)
+            return
         self.status.setText(f"LectureWeave+ {tag.lstrip('v')} is available.")
         answer = QMessageBox.question(
             self,
@@ -2453,9 +2523,10 @@ class MainWindow(QMainWindow):
             self.status.setText(f"LectureWeave+ {tag.lstrip('v')} is available.")
 
     def start_update_download(self, url: str, digest: str, tag: str) -> None:
-        self.start_button.setEnabled(False)
-        self.progress.setRange(0, 0)
-        self.status.setText(f"Downloading LectureWeave+ {tag.lstrip('v')}…")
+        if not self.update_auto:
+            self.start_button.setEnabled(False)
+            self.progress.setRange(0, 0)
+            self.status.setText(f"Downloading LectureWeave+ {tag.lstrip('v')}…")
         self.update_download_worker = UpdateDownloadThread(url, digest, tag)
         self.update_download_worker.progress.connect(self.update_download_progress)
         self.update_download_worker.completed.connect(self.update_download_complete)
@@ -2463,6 +2534,8 @@ class MainWindow(QMainWindow):
         self.update_download_worker.start()
 
     def update_download_progress(self, received: int, total: int) -> None:
+        if self.update_auto:
+            return
         if total > 0:
             self.progress.setRange(0, total)
             self.progress.setValue(received)
@@ -2475,22 +2548,29 @@ class MainWindow(QMainWindow):
             self.status.setText(f"Downloading update… {received / 1048576:.1f} MB")
 
     def update_download_complete(self, installer: str) -> None:
+        tag = getattr(self.update_download_worker, "tag", "")
+        self.pending_update = (installer, str(tag))
+        version = str(tag).lstrip("v")
+        self.update_ready_button.setText(f"Update {version} ready · restart to install".replace("  ", " "))
+        if self.update_auto:
+            self.update_ready_button.setVisible(True)
+            self.append_log(
+                f"LectureWeave+ {version} is downloaded and verified. It installs when you click "
+                "the update button or close the app."
+            )
+            return
         self.progress.setRange(0, 1)
         self.progress.setValue(1)
         self.status.setText("Update verified. Closing LectureWeave+ and installing…")
-        result = QProcess.startDetached(
-            installer,
-            ["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"],
-        )
-        started = result[0] if isinstance(result, tuple) else bool(result)
-        if not started:
+        if not self.install_pending_update(relaunch=True):
             self.update_download_failed(
                 "The verified installer was downloaded, but Windows could not start it."
             )
-            return
-        QApplication.instance().quit()
 
     def update_download_failed(self, message: str) -> None:
+        if self.update_auto:
+            self.append_log(f"Automatic update skipped: {message}")
+            return
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
         self.start_button.setEnabled(True)
@@ -2500,8 +2580,26 @@ class MainWindow(QMainWindow):
 
     def update_check_failed(self, message: str) -> None:
         self.update_button.setEnabled(True)
+        if self.update_auto:
+            self.append_log(f"Automatic update check skipped: {message}")
+            return
         self.status.setText(message)
         QMessageBox.warning(self, APP_NAME, message)
+
+
+def installer_arguments(relaunch: bool) -> list[str]:
+    """Inno Setup switches for a fully invisible update.
+
+    /VERYSILENT shows no wizard or progress window. The installer's own
+    [Run] entry reopens the app only when /RELAUNCH=1 (see installer .iss).
+    """
+    return [
+        "/VERYSILENT",
+        "/SUPPRESSMSGBOXES",
+        "/NORESTART",
+        "/CLOSEAPPLICATIONS",
+        f"/RELAUNCH={1 if relaunch else 0}",
+    ]
 
 
 def run_self_test() -> int:

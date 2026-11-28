@@ -50,5 +50,15 @@ Name: "{group}\Check for updates"; Filename: "{#MyAppURL}/releases/latest"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Open {#MyAppName}"; Flags: nowait postinstall
+; Manual install: offer to open the app on the last page.
+Filename: "{app}\{#MyAppExeName}"; Description: "Open {#MyAppName}"; Flags: nowait postinstall skipifsilent
+; Automatic update (silent): reopen the app only when it asked for a restart
+; (/RELAUNCH=1). Updates installed on close pass /RELAUNCH=0.
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--updated"; Flags: nowait; Check: ShouldRelaunch
+
+[Code]
+function ShouldRelaunch: Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:RELAUNCH|1}') = '1');
+end;
 
