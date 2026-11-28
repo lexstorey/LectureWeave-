@@ -22,7 +22,7 @@ for package in (
     hiddenimports += package_hiddenimports
 
 a = Analysis(
-    ["lecture_transcript_gui_qt.py"],
+    ["lectureweave.py"],
     pathex=[],
     binaries=binaries,
     datas=datas,

@@ -2462,6 +2462,11 @@ def run_self_test() -> int:
         import hf_xet  # noqa: F401
     except ImportError:
         return 9
+    import app_sounds
+
+    if not all(app_sounds.sound_path(name).is_file() for name in app_sounds.SOUNDS):
+        return 10
+    import splash  # noqa: F401  (bundled with the launcher)
     return 0
 
 
@@ -2517,6 +2522,15 @@ def run_content_feature_test() -> int:
         return 13
 
 
+def configure_application(app: QApplication) -> None:
+    app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
+    icon_path = resource_path("assets/lectureweave-plus.ico")
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
+    app.setStyle("Fusion")
+
+
 def main() -> None:
     if "--self-test" in sys.argv:
         raise SystemExit(run_self_test())
@@ -2525,12 +2539,7 @@ def main() -> None:
     if "--content-feature-test" in sys.argv:
         raise SystemExit(run_content_feature_test())
     app = QApplication(sys.argv)
-    app.setApplicationName(APP_NAME)
-    app.setApplicationVersion(APP_VERSION)
-    icon_path = resource_path("assets/lectureweave-plus.ico")
-    if icon_path.exists():
-        app.setWindowIcon(QIcon(str(icon_path)))
-    app.setStyle("Fusion")
+    configure_application(app)
     window = MainWindow()
     window.show()
     raise SystemExit(app.exec())
