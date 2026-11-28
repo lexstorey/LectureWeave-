@@ -15,6 +15,13 @@ reading copy with slide images.
 ## Current capabilities
 
 - Drag-and-drop local lecture videos
+- A short opening animation with sound while the app loads (the sound bars
+  turn into transcript lines), skippable with a click and switchable off in
+  Settings
+- A distinct sound, Windows notification and taskbar flash when a generation
+  finishes or fails
+- An optional slide-review step before export (on by default; turn it off in
+  Settings to go straight from alignment to the finished files)
 - **Claude pack (.md):** full verbatim transcript grouped by slide, with each
   slide's own text, a mechanical lecture header (decks, slide coverage, gaps,
   chat clock, terms index, emphasis cues), filtered chat linked to spoken

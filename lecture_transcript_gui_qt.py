@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QSystemTrayIcon,
     QSplitter,
     QTextEdit,
     QVBoxLayout,
@@ -83,7 +84,7 @@ from lecture_to_docx import (
 
 
 APP_NAME = "LectureWeave+"
-APP_VERSION = "0.4.4"
+APP_VERSION = "0.5.0"
 REPOSITORY_URL = "https://github.com/lexstorey/LectureWeave-"
 PURPLE = "#4A148C"
 PURPLE_DARK = "#32105D"
@@ -502,6 +503,7 @@ class ProcessingThread(QThread):
         write_docx: bool = True,
         pseudonymise: bool = True,
         bundle_zip: bool = False,
+        review_slides: bool = True,
     ) -> None:
         super().__init__()
         self.video = video
@@ -519,6 +521,7 @@ class ProcessingThread(QThread):
         self.write_docx = write_docx
         self.pseudonymise = pseudonymise
         self.bundle_zip = bundle_zip
+        self.review_slides = review_slides
         self.result_files: list[Path] = []
         self.result_notes: list[str] = []
         self.whisperx_python = whisperx_python
@@ -714,14 +717,17 @@ class ProcessingThread(QThread):
                         f"Omitted {len(omitted_slides)} brief navigation slide appearances"
                     )
 
-                self.status.emit("Waiting for slide and transcript review…")
                 self.raise_if_cancelled()
-                self.review_requested.emit(copy.deepcopy(slides))
-                self.review_event.wait()
-                if self.reviewed_slides is None:
-                    raise ProcessingCancelled("Generation cancelled during review.")
-                slides = self.reviewed_slides
-                print(f"Review accepted with {len(slides)} slide appearances")
+                if self.review_slides:
+                    self.status.emit("Waiting for slide and transcript review…")
+                    self.review_requested.emit(copy.deepcopy(slides))
+                    self.review_event.wait()
+                    if self.reviewed_slides is None:
+                        raise ProcessingCancelled("Generation cancelled during review.")
+                    slides = self.reviewed_slides
+                    print(f"Review accepted with {len(slides)} slide appearances")
+                else:
+                    print(f"Review step skipped (turned off in Settings); {len(slides)} slide appearances")
 
                 alignment = [
                     {
@@ -1110,6 +1116,7 @@ class MainWindow(QMainWindow):
         self.hf_access_worker: HuggingFaceAccessThread | None = None
         self.settings = QSettings("LectureWeave", "LectureWeavePlus")
         self.last_output: Path | None = None
+        self.tray_icon: QSystemTrayIcon | None = None
 
         self.setStyleSheet(
             f"""
@@ -1556,6 +1563,26 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(14)
+
+        general_card, general_layout = self.card()
+        general_layout.addWidget(self.section_label("General"))
+        self.animation_check = QCheckBox("Play the opening animation when LectureWeave+ starts")
+        self.sounds_check = QCheckBox("Play sounds (start-up, finished and failed)")
+        self.review_check = QCheckBox("Review slides before export (deck numbers, slide text, merges)")
+        for check, key in (
+            (self.animation_check, "ui/startup_animation"),
+            (self.sounds_check, "ui/sounds"),
+            (self.review_check, "review/enabled"),
+        ):
+            check.setChecked(self.settings.value(key, True, type=bool))
+            check.toggled.connect(lambda checked, key=key: self.settings.setValue(key, checked))
+            general_layout.addWidget(check)
+        general_layout.addWidget(
+            self.hint_label(
+                "With review off, generation goes straight from alignment to writing the files."
+            )
+        )
+        layout.addWidget(general_card)
 
         speakers_card, speakers_layout = self.card()
         speakers_layout.addWidget(self.section_label("Speakers and word alignment (WhisperX)"))
@@ -2117,6 +2144,7 @@ class MainWindow(QMainWindow):
             write_docx=self.docx_check.isChecked(),
             pseudonymise=self.pseudonymise_check.isChecked(),
             bundle_zip=self.zip_check.isChecked(),
+            review_slides=self.settings.value("review/enabled", True, type=bool),
         )
         self.worker.status.connect(self.status.setText)
         self.worker.progress.connect(self.processing_progress)
@@ -2280,6 +2308,35 @@ class MainWindow(QMainWindow):
     def append_log(self, message: str) -> None:
         self.log.append(message)
 
+    def notify_finished(self, success: bool, detail: str) -> None:
+        """Sound, Windows notification and taskbar flash for a finished run."""
+        if self.settings.value("ui/sounds", True, type=bool):
+            import app_sounds
+
+            app_sounds.play("done" if success else "failed")
+        title = "Lecture pack ready" if success else "Generation stopped"
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            if self.tray_icon is None:
+                self.tray_icon = QSystemTrayIcon(self.windowIcon(), self)
+                self.tray_icon.setToolTip(APP_NAME)
+                self.tray_icon.messageClicked.connect(self.bring_to_front)
+                self.tray_icon.activated.connect(lambda _reason: self.bring_to_front())
+            self.tray_icon.show()
+            self.tray_icon.showMessage(
+                title,
+                detail,
+                QSystemTrayIcon.MessageIcon.Information if success else QSystemTrayIcon.MessageIcon.Warning,
+                10000,
+            )
+        QApplication.alert(self)
+
+    def bring_to_front(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
+
     def processing_complete(self, value: str) -> None:
         self.progress.setRange(0, 1)
         self.progress.setValue(1)
@@ -2294,7 +2351,10 @@ class MainWindow(QMainWindow):
         message += f"\n\nIn: {files[0].parent}"
         if notes:
             message += "\n\n" + "\n".join(notes)
+        self.notify_finished(True, f"{self.title_edit.text().strip() or files[0].stem} · {files[0].name}")
         QMessageBox.information(self, APP_NAME, message)
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
 
     def processing_cancelled(self) -> None:
         self.progress.setRange(0, 1)
@@ -2312,7 +2372,10 @@ class MainWindow(QMainWindow):
         self.set_generation_active(False)
         self.status.setText("Processing stopped because of an error.")
         self.append_log(value)
+        self.notify_finished(False, f"{self.title_edit.text().strip() or 'Lecture'}: open LectureWeave+ to see why.")
         QMessageBox.critical(self, APP_NAME, value)
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
 
     def open_output(self) -> None:
         if self.last_output and self.last_output.exists():

@@ -69,6 +69,22 @@ def swish(seconds: float = 0.25, gain: float = 0.16) -> np.ndarray:
     return gain * shaped * shape
 
 
+def slide_in(seconds: float = 0.42, gain: float = 0.2) -> np.ndarray:
+    """A soft, low whoomp for the slide rising in behind the page."""
+    rng = np.random.default_rng(11)
+    n = int(RATE * seconds)
+    noise = rng.uniform(-1, 1, n)
+    spectrum = np.fft.rfft(noise)
+    freqs = np.fft.rfftfreq(n, 1 / RATE)
+    shaped = np.fft.irfft(spectrum * np.exp(-((freqs / 700) ** 2)), n)
+    shaped /= np.max(np.abs(shaped)) or 1
+    t = np.arange(n) / RATE
+    swell = np.sin(np.pi * np.clip(t / seconds, 0, 1)) ** 2
+    freq = 150 * (220 / 150) ** (t / seconds)
+    body = np.sin(2 * np.pi * np.cumsum(freq) / RATE) * swell
+    return gain * (0.7 * shaped * swell + 0.6 * body)
+
+
 def place(track: np.ndarray, sound: np.ndarray, at: float) -> None:
     start = int(RATE * at)
     end = min(len(track), start + len(sound))
@@ -90,11 +106,12 @@ def write(name: str, track: np.ndarray) -> None:
 
 def main() -> None:
     startup = silence(2.6)
-    place(startup, thump(), 0.05)
-    place(startup, thump(0.22), 0.24)
-    place(startup, swish(), 0.46)
-    place(startup, chime(659.25), 1.15)
-    place(startup, chime(987.77, 0.28), 1.27)
+    place(startup, thump(0.24), 0.08)
+    place(startup, thump(0.2), 0.24)
+    place(startup, swish(), 0.36)
+    place(startup, slide_in(), 0.77)
+    place(startup, chime(659.25), 1.21)
+    place(startup, chime(987.77, 0.28), 1.31)
     write("startup.wav", startup)
 
     done = silence(1.4)

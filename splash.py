@@ -1,7 +1,8 @@
 """The LectureWeave+ opening animation: "sound becomes text".
 
-The gold sound bars pulse, turn sideways and fly into the transcript page as
-its lines; the slide rises in behind, the bars settle back into place, the
+The gold sound bars pulse, turn sideways, land at the left of their rows on
+the transcript page and stretch into its lines (gold turning purple); the
+slide rises in behind, small bars settle into its corner, the
 "+" pops in with a chime and the name comes into focus. It is drawn with
 QPainter from the logo's own shapes (assets/lectureweave-plus.svg, a 512-unit
 square), so it stays sharp at any display scaling.
@@ -19,7 +20,8 @@ from PySide6.QtCore import QElapsedTimer, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
-DURATION = 1.6  # seconds
+DURATION = 1.65  # seconds
+MORPH = 0.94  # seconds for one sound bar to become its line
 FADE_MS = 220
 
 PURPLE = QColor("#36145F")
@@ -171,7 +173,7 @@ class StartupSplash(QWidget):
 
     def draw_logo(self, p: QPainter, t: float) -> None:
         # Slide frame, rising in behind.
-        back = ease_out(progress(t, 0.75, 0.3))
+        back = ease_out(progress(t, 0.8, 0.25))
         if back > 0:
             p.save()
             p.setOpacity(back)
@@ -195,9 +197,9 @@ class StartupSplash(QWidget):
             self.rounded(p, 252, 190, 130, 14, 7, LAVENDER)
             p.restore()
 
-        # Sound bars settling back into their place.
+        # Sound bars settling into the slide's corner.
         for index, (x, y, w, h) in enumerate(BARS):
-            settle = progress(t, 0.95 + index * 0.05, 0.2)
+            settle = progress(t, 1.02 + index * 0.04, 0.14)
             if settle > 0:
                 scale = overshoot(settle, 2.2)
                 p.save()
@@ -207,7 +209,7 @@ class StartupSplash(QWidget):
                 p.restore()
 
         # Transcript page.
-        page = ease_out(progress(t, 0.3, 0.2))
+        page = ease_out(progress(t, 0.28, 0.19))
         if page > 0:
             p.save()
             p.setOpacity(page)
@@ -242,26 +244,23 @@ class StartupSplash(QWidget):
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawPath(fold)
             p.restore()
-
-            accent = ease_out(progress(t, 0.55, 0.13))
+            accent = ease_out(progress(t, 0.52, 0.14))
             if accent > 0:
-                self.rounded(p, 259, 248, 74 * accent, 17, 8.5, GOLD)
-            for index, (x, y, w, h) in enumerate(LINES):
-                grow = ease_out(progress(t, 0.6 + index * 0.05, 0.15))
-                if grow > 0:
-                    self.rounded(p, x, y, max(h, w * grow), h, h / 2, PURPLE_MID)
-            dot = ease_out(progress(t, 0.8, 0.1))
+                self.rounded(p, 259, 248, max(17, 74 * accent), 17, 8.5, GOLD)
+            dot = ease_out(progress(t, 0.83, 0.1))
             if dot > 0:
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(GOLD)
                 p.drawEllipse(QPointF(402, 417), 8 * dot, 8 * dot)
 
-        # Sound bars: pulse at the centre, then turn and fly into the lines.
-        for index, (x, y, w, h) in enumerate(BARS):
-            self.draw_flying_bar(p, t, index, x, y, w, h)
+        # Each sound bar becomes a transcript line: it pulses, turns sideways,
+        # lands at the left of its row as a gold pill, then stretches across
+        # the page and turns purple.
+        for index in range(len(LINES)):
+            self.draw_morphing_line(p, t, index)
 
         # The "+" badge.
-        plus = progress(t, 1.15, 0.22)
+        plus = progress(t, 1.21, 0.2)
         if plus > 0:
             scale = overshoot(plus, 2.4)
             p.save()
@@ -274,35 +273,55 @@ class StartupSplash(QWidget):
             self.rounded(p, -26, -5, 52, 10, 5, PURPLE)
             p.restore()
 
-    def draw_flying_bar(self, p: QPainter, t: float, index: int, x: float, y: float, w: float, h: float) -> None:
-        if t >= 0.86:
-            return
-        start = (256 + (index - 1.5) * 44, 250)
+    def draw_morphing_line(self, p: QPainter, t: float, index: int) -> None:
         line_x, line_y, line_w, line_h = LINES[index]
-        end = (line_x + line_w / 2, line_y + line_h / 2)
-        appear = ease_out(progress(t, 0.0, 0.08))
-        if t < 0.45:
-            pulse = 1.0 + 0.32 * math.sin((t / 0.45) * math.pi * 2.0 + index * 0.9) * (1 - t / 0.45 * 0.6)
-            px, py, rotation, sx, sy, opacity = start[0], start[1], 0.0, 1.6, 1.6 * appear * pulse, appear
-        else:
-            move = ease_in_out(progress(t, 0.45, 0.3))
-            px = start[0] + (end[0] - start[0]) * move
-            py = start[1] + (end[1] - start[1]) * move
-            rotation = 90 * move
-            sx = sy = 1.6 - 0.6 * move
-            opacity = 1.0 - progress(t, 0.75, 0.1)
-        if opacity <= 0:
+        bar_h = BARS[index][3]
+        local = (t - index * 0.033) / MORPH
+        if local <= 0:
             return
+        local = min(local, 1.0)
+        centre_x, centre_y = line_x + line_w / 2, line_y + line_h / 2
+        start_x = 256 + (index - 1.5) * 44 - centre_x
+        start_y = 250 - centre_y
+        bar_scale = bar_h * 1.6 / line_w
+        pill = 24 / line_w
+        # (time, dx, dy, rotation, scale x, scale y, purple amount, opacity)
+        frames = [
+            (0.00, start_x, start_y, 90, 0.0, 1.8, 0.0, 0.0),
+            (0.08, start_x, start_y, 90, bar_scale, 1.8, 0.0, 1.0),
+            (0.17, start_x, start_y, 90, bar_scale * 0.6, 1.8, 0.0, 1.0),
+            (0.26, start_x, start_y, 90, bar_scale * 1.15, 1.8, 0.0, 1.0),
+            (0.36, start_x, start_y, 90, bar_scale, 1.8, 0.0, 1.0),
+            (0.62, -(line_w - 24) / 2, 0, 0, pill, 1.15, 0.0, 1.0),
+            (0.84, 0, 0, 0, 1.0, 1.0, 1.0, 1.0),
+            (1.00, 0, 0, 0, 1.0, 1.0, 1.0, 1.0),
+        ]
+        for (t0, *a), (t1, *b) in zip(frames, frames[1:]):
+            if local <= t1:
+                mix = ease_in_out(clamp((local - t0) / (t1 - t0)))
+                dx, dy, rotation, sx, sy, purple, opacity = [
+                    first + (second - first) * mix for first, second in zip(a, b)
+                ]
+                break
+        else:
+            dx, dy, rotation, sx, sy, purple, opacity = frames[-1][1:]
+        if opacity <= 0 or sx <= 0:
+            return
+        colour = QColor(
+            round(GOLD.red() + (PURPLE_MID.red() - GOLD.red()) * purple),
+            round(GOLD.green() + (PURPLE_MID.green() - GOLD.green()) * purple),
+            round(GOLD.blue() + (PURPLE_MID.blue() - GOLD.blue()) * purple),
+        )
         p.save()
         p.setOpacity(opacity)
-        p.translate(px, py)
+        p.translate(centre_x + dx, centre_y + dy)
         p.rotate(rotation)
         p.scale(sx, sy)
-        self.rounded(p, -w / 2, -h / 2, w, h, w / 2, GOLD)
+        self.rounded(p, -line_w / 2, -line_h / 2, line_w, line_h, line_h / 2, colour)
         p.restore()
 
     def draw_name(self, p: QPainter, t: float, area: QRectF) -> None:
-        focus = ease_out(progress(t, 1.2, 0.35))
+        focus = ease_out(progress(t, 1.29, 0.33))
         if focus <= 0:
             return
         font = QFont("Segoe UI", 22)
