@@ -35,6 +35,7 @@ libreoffice-portable/
 *.mov
 *.avi
 *.wav
+!assets/sounds/*.wav
 *.mp3
 
 # Editor and operating-system files
